@@ -301,3 +301,40 @@ Add a "Reset Demo Data" button (re-runs the seed script) so the app can be relia
 
 **Step 15 — Deploy**
 Deploy to Vercel. Confirm the SQLite file persists correctly for the demo session (acceptable for hackathon scope; note in README that a production version would use Postgres).
+
+---
+
+## 8. REVISION — MULTI-STAGE AGENT PIPELINE (supersedes the single-pass loop in Section 3 / Step 5)
+
+This revision restructures the agent from one flat `plan → tool_call → observe → decide → act` loop into **8 named stages**. Everything else in this brief (pages, tech stack, seed data, colors, PDF generation, deadlines, decision thresholds) stays exactly as written.
+
+### 8.1 Pipeline stages
+
+1. **Intake & Extraction** — merges the old Document extraction + Entity extraction into a single call. Reads the raw intake, resolves patient, payer, procedure/diagnosis codes, and denial reason.
+2. **Medical Review** and **3. Policy Review** — run **in parallel**, each with its own system prompt and restricted tool access:
+   - Medical Review only touches chart notes (`fetchPatientRecord`).
+   - Policy Review only touches LCD/payer-policy data (`fetchPayerPolicy`).
+4. **Strategy** *(new stage)* — computes win-probability across candidate approaches using seeded case history + payer-specific track record. **Multi-payer policy diffing lives here** — it is not a separate feature but an input this stage queries (via `checkPriorAuthHistory` and payer-policy data).
+5. **Decision Intelligence** — same auto-appeal / request-evidence / escalate logic and thresholds as before, but now consumes the Medical + Policy + Strategy summaries instead of raw documents.
+6. **Appeal Generation** — unchanged in purpose; now receives only the Decision stage's output, not raw source docs.
+7. **Verification / QA** *(new stage)* — independently checks the generated appeal for hallucinated citations, wrong patient/policy/code references, and unsupported claims **before it reaches the human**.
+8. **Human Approval** — unchanged.
+9. **Submission + Tracking** — unchanged, still simulated.
+
+### 8.2 Data model additions
+
+- `Case` gains a `strategyOptions` JSON field (candidate strategies + win-probability estimates) and a `verificationResult` JSON field (pass/fail + flagged issues), alongside the existing `recommendation` field.
+- `TraceStep.stepType` gains four new values — `"medical_review"`, `"policy_review"`, `"strategy"`, `"verification"` — in addition to the existing `tool_call` / `decision` / `human_action`, so the trace panel can label which stage produced each line.
+
+### 8.3 Tools
+
+- **No new tools.** Strategy and Verification are prompt/scope changes layered on the existing tools (`fetchPatientRecord`, `fetchPayerPolicy`, `checkPriorAuthHistory`), not new API calls.
+
+### 8.4 Explicitly cut / not added
+
+- No separate Learning Agent and no separate Memory Agent as LLM calls — "memory" stays a plain DB query (`checkPriorAuthHistory`) feeding the Strategy stage, not its own reasoning step.
+- No separate Document / Entity / Orchestrator agents as distinct LLM calls — these are merged into stage 1 to avoid unnecessary sequential latency.
+
+### 8.5 UI (Case Detail trace panel)
+
+- Trace lines get a small stage label/icon — 🩺 Medical / 📚 Policy / 🎯 Strategy / ✅ Verification / 🤖 Decision — instead of an undifferentiated log. This is what makes the multi-stage pipeline visible to judges, with no new pages.
