@@ -150,14 +150,14 @@ sequenceDiagram
 
 - **Presentation layer** (`app/`): Dashboard, Intake, Case Detail, Audit, Analytics pages plus shared layout (sidebar, agent-status indicator, global search).
 - **API layer** (`app/api/`): thin route handlers that validate input (zod), read/write via Prisma, and kick off or resume the agent.
-- **Agent layer** (`lib/`): `agentRunner.ts` (the nine-stage pipeline, including the parallel Medical/Policy review and the Verification_QA step), `qwen.ts`, `agentTools.ts`, `decisionEngine.ts`, `sla.ts`, `appealPdf.ts`.
+- **Agent layer** (`lib/`): `agentRunner.ts` (the nine-stage pipeline, including the parallel Medical/Policy review and the Verification_QA step), `qwen.ts`, `agentTools.ts`, `decisionEngine.ts`, `sla.ts`, `appealPdf.ts`, plus the hardening modules `findings.ts` (structured findings + severity), `auditChain.ts` (tamper-evident hash chain), `guard.ts` (untrusted-content safety guard), `caseStatus.ts` (status-transition guard), and `idempotency.ts` (idempotency-key store). Behavioral evaluation lives in `eval/gold/*.json` + `scripts/eval.ts`.
 - **Data layer** (`prisma/`): schema, migrations, and `seed.ts`.
 
 ## Components and Interfaces
 
 ### Qwen_Client (`lib/qwen.ts`)
 
-Typed wrapper around the DashScope/OpenRouter OpenAI-compatible chat-completions endpoint. Supports the `tools` (function-calling) parameter and retry logic.
+Typed wrapper around the DashScope/OpenRouter OpenAI-compatible chat-completions endpoint. Supports the `tools` (function-calling) parameter and a resilient retry policy that distinguishes transient from permanent failures (Requirements 6.5–6.9).
 
 ```typescript
 interface QwenToolCall {
@@ -171,14 +171,47 @@ interface QwenResponse {
   content: string | null;    // final text when no tool calls
 }
 
-// Retries the call up to 2 additional times (3 attempts total) on failure.
+// Structured failure result reported to the Agent_Runner instead of an
+// uncaught throw, so a stage can degrade deterministically (Req 6.8, 6.9).
+type QwenFailureKind =
+  | "network"      // transport/connection error            → transient
+  | "timeout"      // per-attempt bounded timeout elapsed     → transient (Req 6.6)
+  | "http_429"     // rate limited                            → transient
+  | "http_5xx"     // 500 / 502 / 503 / 504                   → transient
+  | "http_4xx"     // 4xx other than 429                      → permanent
+  | "malformed"    // unparseable / schema-invalid response   → permanent
+  | "empty";       // no content and no tool calls            → permanent
+
+interface QwenFailure {
+  ok: false;
+  kind: QwenFailureKind;
+  transient: boolean;   // true ⇒ eligible for backoff+retry (Req 6.7)
+  attempts: number;     // total attempts made (1..3)
+  detail: string;
+}
+
+type QwenOutcome = ({ ok: true } & QwenResponse) | QwenFailure;
+
+// Per-attempt bounded timeout + exponential backoff between retries.
+// Retries ONLY transient failures, up to 3 attempts total (original + 2).
 async function callQwen(
   messages: ChatMessage[],
   tools?: ToolSchema[],
-): Promise<QwenResponse>;
+): Promise<QwenOutcome>;
+
+// Pure, table-driven classifier used by callQwen and unit/property tests.
+function classifyQwenFailure(
+  err: { status?: number; timedOut?: boolean; body?: unknown },
+): { kind: QwenFailureKind; transient: boolean };
 ```
 
-Configuration comes from `QWEN_API_KEY` and `QWEN_API_BASE`. On the third consecutive failure, `callQwen` throws a `QwenUnavailableError` that the Agent_Runner catches.
+Configuration comes from `QWEN_API_KEY`, `QWEN_API_BASE`, and a per-attempt timeout (`QWEN_ATTEMPT_TIMEOUT_MS`).
+
+**Retry policy (Requirements 6.5–6.8).** Each attempt is wrapped in a bounded timeout (Req 6.6); an elapsed timeout is treated as a `timeout` transient failure. `classifyQwenFailure` maps each error to a `kind` and a `transient` flag:
+- **Transient** — network error, per-attempt timeout, or HTTP `429`, `500`, `502`, `503`, `504`. The client waits an exponentially increasing backoff and retries, up to the 3-attempt total (original + 2, Req 6.5, 6.7).
+- **Permanent** — any HTTP `4xx` other than `429`, or a malformed/empty response body. The client stops immediately and returns a structured `QwenFailure` on that attempt **without a further retry** (Req 6.8).
+
+If all transient retries are exhausted, or a permanent failure is hit, `callQwen` resolves to a `QwenFailure` (it does not throw). The Agent_Runner inspects the outcome and, on any `QwenFailure`, degrades the calling `Pipeline_Stage` gracefully by setting the `Resolution_Path` to `Escalate_To_Human` (status `NeedsHumanInput`) rather than terminating the run abnormally (Req 6.9). See Error Handling → Qwen client failures.
 
 ### Agent_Tools (`lib/agentTools.ts`)
 
@@ -253,7 +286,7 @@ async function runStage<S>(caseId: string, stage: PipelineStage, ...): Promise<S
 
 Responsibilities, in stage order:
 
-1. **Intake_And_Extraction.** Set status `Investigating`; in a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as `Extracted_Field`s (Requirement 20.3). When the extracted patient matches a known `Patient` record, set `Case.patientId` to that record's id; when it does not match, leave `Case.patientId` unset (Requirements 2.5, 2.6). When the extracted payer resolves to a known `Payer`, set the Case payer reference — `Case.payerId` and the convenience field `Case.payerName` — to that Payer; when it does not resolve, leave both unset (Requirements 2.7, 2.8). For any of the five fields that cannot be resolved — including an unmatched patient or unresolved payer — record a `Trace_Step` naming each unresolved field and continue the pipeline (Requirement 20.4). This stage merges the former Document + Entity steps into one call (Requirements 20.12). `Case.patientId` is the linkage that dashboard patient initials, global patient search, and prior-auth history depend on; the Case payer reference is the grouping key for denials-by-payer analytics (independent of any linked Patient).
+1. **Intake_And_Extraction.** Set status `Investigating`; in a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as `Extracted_Field`s (Requirement 20.3). **Before** the raw Intake text (or any extracted document text) is placed into the extraction prompt, it is screened through the `Safety_Guard` (`screenUntrusted`): the content is fenced and labeled as untrusted data, and prompt-injection / instruction-override patterns are detected with deterministic non-LLM rules; on detection the stage records a `Trace_Step` flagging the attempt and the content is supplied to Qwen strictly as data, never as instructions (Requirement 27). When the extracted patient matches a known `Patient` record, set `Case.patientId` to that record's id; when it does not match, leave `Case.patientId` unset (Requirements 2.5, 2.6). When the extracted payer resolves to a known `Payer`, set the Case payer reference — `Case.payerId` and the convenience field `Case.payerName` — to that Payer; when it does not resolve, leave both unset (Requirements 2.7, 2.8). For any of the five fields that cannot be resolved — including an unmatched patient or unresolved payer — record a `Trace_Step` naming each unresolved field and continue the pipeline (Requirement 20.4). This stage merges the former Document + Entity steps into one call (Requirements 20.12). `Case.patientId` is the linkage that dashboard patient initials, global patient search, and prior-auth history depend on; the Case payer reference is the grouping key for denials-by-payer analytics (independent of any linked Patient).
 2. **Medical_Review** and **3. Policy_Review — run concurrently** via `Promise.all([runStage(..., "Medical_Review"), runStage(..., "Policy_Review")])`. Medical_Review is scoped to `fetchPatientRecord` and writes `stepType: "medical_review"`; Policy_Review is scoped to `fetchPayerPolicy` and writes `stepType: "policy_review"`. Because they are awaited together, each begins before the other completes (Requirement 20.2). Each produces a summary consumed downstream.
 4. **Strategy.** Invoke `checkPriorAuthHistory(patientId)` for seeded case history and query multi-payer policy diffing as an input (Requirement 17.3); compute 1–5 candidate appeal approaches, each with an integer win-probability (0–100), using the history and payer-specific track record. If history is empty or the tool fails, fall back to payer track record only and record that history was unavailable (Requirement 21.3). Store the approaches as `strategyOptions`, ordered by descending win-probability (Requirements 21.4, 23.1); write `stepType: "strategy"`.
 5. **Decision_Intelligence.** Call the pure `Decision_Engine` over the Medical_Review, Policy_Review, and Strategy summaries (not raw documents, Requirement 5.2); persist the `decision` `Trace_Step`. On loop exhaustion without a decision, force `Escalate_To_Human` with a "needs manual review" trace step.
@@ -293,12 +326,14 @@ type FlaggedIssueType =
   | "unsupported_citation"   // citation not backed by Payer_Policy/Chart_Note (Req 22.1)
   | "reference_mismatch"     // patient/policy/code ref ≠ Extracted_Field value (Req 22.2)
   | "unsupported_claim"      // claim not backed by retrieved evidence (Req 22.3)
+  | "unresolved_citation"    // citation/reference does not resolve to a stored in-scope record (Req 22.8, 22.9)
   | "verification_error";    // checks could not complete (Req 22.7)
 
 interface FlaggedIssue {
   type: FlaggedIssueType;
   reference: string;   // the offending citation / reference / claim text
   detail: string;      // explanation of why it was flagged
+  severity: "warning" | "blocking"; // grounding failures and contradictions are blocking (Req 22.9, 29.2, 29.3)
 }
 
 interface VerificationResult {
@@ -307,7 +342,11 @@ interface VerificationResult {
 }
 ```
 
-The stage runs all three checks (citations, references, claims), collects every flagged issue, and derives `status` as `pass` when the list is empty and `fail` otherwise. On a processing error it stores `{ status: "fail", flaggedIssues: [{ type: "verification_error", ... }] }` and the Case is not presented as verified (Requirement 22.7). Human_Approval is gated on a stored `verificationResult` (Requirement 22.5).
+The stage runs four checks and collects every flagged issue:
+1. **Support checks** (Req 22.1–22.3) — each citation is backed by retrieved Payer_Policy/Chart_Note data, each patient/policy/code reference matches the corresponding `Extracted_Field`, and each claim is backed by retrieved evidence.
+2. **Grounding check** (Req 22.8) — beyond support, every citation and reference in the Appeal_Packet — the payer-policy clause or identifier, the chart-note evidence, the diagnosis/procedure code, and the patient — must **resolve to an actual stored record in scope for the Case** (the Case's linked/derived Payer, ChartNotes, and Patient). Any reference that does not resolve is added as an `unresolved_citation` issue with `severity: "blocking"`, which forces `status: "fail"` so the appeal is never presented as verified (Req 22.9).
+
+`status` is derived as `pass` when the collected list is empty and `fail` otherwise. On a processing error it stores `{ status: "fail", flaggedIssues: [{ type: "verification_error", severity: "blocking", ... }] }` and the Case is not presented as verified (Requirement 22.7). Human_Approval is gated on a stored `verificationResult` (Requirement 22.5). Each flagged issue is also recorded as a `Finding` (see Findings below) so blocking issues drive routing while warnings stay visible without escalating (Requirements 29.1, 29.3).
 
 ### Decision_Engine (`lib/decisionEngine.ts`)
 
@@ -318,7 +357,7 @@ type ResolutionPath = "Auto_Draft" | "Draft_And_Request_Evidence" | "Escalate_To
 
 interface DecisionInput {
   overallConfidence: number;   // 0..100
-  contradictionCount: number;  // >= 0
+  contradictionCount: number;  // >= 0 — effectively the count of BLOCKING Findings (Req 29.4)
   iterationsExhausted: boolean;
 }
 
@@ -338,6 +377,8 @@ Rule (evaluated in order):
 
 Contradiction always dominates confidence (Requirement 4.4), so it is checked first.
 
+**Findings-driven routing (Requirement 29).** Contradictions, gaps, policy issues, and verification issues are surfaced as structured `Finding`s (see Findings component). Routing to `Escalate_To_Human` / `NeedsHumanInput` is driven **only by blocking findings**: the `contradictionCount` fed to `decide` is exactly the number of `Finding`s whose `severity` is `"blocking"` (contradictions are always blocking, Req 29.2). Findings whose severity is `"warning"` are surfaced to the reviewer but never, on their own, force escalation (Req 29.4, 29.5). Because `decide` escalates iff `contradictionCount > 0` (or confidence is low / iterations exhausted), escalation-by-findings occurs if and only if at least one blocking finding exists.
+
 ### SLA_Clock (`lib/sla.ts`)
 
 Pure time computations.
@@ -348,6 +389,161 @@ function remainingMs(deadline: Date, now: Date): number;        // may be negati
 function isAtRisk(deadline: Date, now: Date): boolean;          // remaining < 24h (incl. overdue)
 ```
 
+### Findings (`lib/findings.ts`)
+
+Contradictions, gaps, policy issues, and verification issues are represented uniformly as structured `Finding`s carrying a stable identifier and a severity, so that only genuinely blocking problems force escalation while warnings stay visible (Requirement 29).
+
+```typescript
+type FindingSeverity = "warning" | "blocking";
+
+type FindingKind = "contradiction" | "gap" | "policy" | "verification";
+
+interface Finding {
+  findingId: string;          // stable id, e.g. "contradiction:dx-mismatch:<caseId>"
+  kind: FindingKind;
+  severity: FindingSeverity;  // contradictions are always "blocking" (Req 29.2)
+  expected?: string;          // where applicable
+  actual?: string;            // where applicable
+  technicalMessage: string;   // precise, for the audit/technical view
+  friendlyMessage: string;    // patient/operator-friendly phrasing (Req 29.1)
+}
+
+// Count of blocking findings — this is the value fed to Decision_Engine as
+// contradictionCount, so routing depends ONLY on blocking findings (Req 29.4).
+function blockingCount(findings: Finding[]): number;
+
+// Escalation gate: true iff at least one blocking finding exists.
+function shouldEscalate(findings: Finding[]): boolean;
+```
+
+Every contradiction/gap/policy/verification issue the runner produces is emitted as a `Finding` (Req 29.1). Contradictions are assigned `blocking` (Req 29.2); Verification_QA flagged issues map to `blocking` or `warning` according to their effect on appeal validity — `unresolved_citation` and support failures that invalidate the appeal are `blocking`, softer advisories are `warning` (Req 29.3). Routing to `Escalate_To_Human` / `NeedsHumanInput` is based only on findings with `severity: "blocking"` (Req 29.4); `warning` findings are surfaced in the human action zone without forcing escalation (Req 29.5).
+
+### Audit_Chain (`lib/auditChain.ts`)
+
+Every audit event (each `Trace_Step`, and each `Human_Action` recorded as a `human_action` Trace_Step) is chained by hash to the immediately preceding event for its Case, so that any later tampering is detectable (Requirement 25).
+
+```typescript
+const GENESIS_HASH = "0".repeat(64); // fixed, well-known start value (Req 25.2)
+
+// Deterministic, order-stable textual representation of an audit event's
+// content — the input to hashing. Identical content ⇒ identical string.
+function canonicalSerialize(event: AuditEventContent): string;   // (Req 25.1)
+
+// hash = sha256(prevHash + canonicalSerialize(content)).
+function computeHash(prevHash: string, event: AuditEventContent): string;
+
+// Result of walking the whole chain for a Case.
+interface AuditVerifyResult {
+  intact: boolean;
+  headHash: string;                 // stored hash of the most recent event (Req 25.4)
+  firstBrokenEventId?: string;      // set when intact === false (Req 25.5, 25.6)
+  reason?: "hash_mismatch" | "prevhash_mismatch";
+}
+
+// Re-walks the ordered audit events for a Case and re-derives each hash.
+async function verifyAuditChain(caseId: string): Promise<AuditVerifyResult>;
+```
+
+**On write (Req 25.1–25.3).** When an audit event is recorded, the runner computes `hash = computeHash(prevHash, content)` where `prevHash` is the `hash` of the immediately preceding audit event for that Case, or `GENESIS_HASH` for the first event (Req 25.2). Both `prevHash` and `hash` are stored on the event (new `TraceStep` columns). For a mutating change, the event `content` includes the **before-state and after-state** of the changed fields (Req 25.3), so the mutation itself is part of what is hashed.
+
+**On verify (Req 25.4–25.7).** `verifyAuditChain(caseId)` walks the events in chronological order and, for each, recomputes the hash from its stored `prevHash` and canonical content:
+- If a recomputed hash ≠ the stored `hash` → chain is **broken**; report the first such event (Req 25.5).
+- If a stored `prevHash` ≠ the stored `hash` of the previous event → chain is **broken**; report the first such event (Req 25.6).
+- If neither mismatch occurs across all events → chain is **intact**; return `{ intact: true, headHash }` where `headHash` is the stored hash of the most recent event (Req 25.7).
+
+The operation always identifies the **earliest** offending event so tampering can be localized.
+
+### Safety_Guard (`lib/guard.ts`)
+
+A deterministic, **non-LLM** screening component that fences untrusted Intake/document text as data and detects prompt-injection / instruction-override patterns before any content is placed into a Qwen_Client prompt (Requirement 27).
+
+```typescript
+interface GuardResult {
+  fenced: string;            // content wrapped in an explicit data fence (Req 27.2)
+  injectionDetected: boolean;
+  matchedPatterns: string[]; // which override patterns matched (empty ⇒ none)
+}
+
+// Pure, rule-based — MUST NOT call any language model (Req 27.3).
+function screenUntrusted(rawText: string): GuardResult;
+```
+
+Before any prompt that incorporates raw Intake text or extracted document text is sent to the Qwen_Client, the Agent_Runner passes the text through `screenUntrusted` (Req 27.1). The guard always **fences** the content — wrapping it in explicit data delimiters and labeling it as untrusted data rather than instructions (Req 27.2) — and matches it against a deterministic set of prompt-injection / instruction-override patterns (e.g. "ignore previous instructions", "disregard the system prompt", "you are now", role-reassignment and tool-directive phrasings) using plain string/regex rules, with no model call (Req 27.3). When a pattern matches, the runner records a `Trace_Step` flagging the detected injection attempt (Req 27.4) and the fenced content is still only ever supplied as data — it is never promoted to agent instructions (Req 27.5). Fencing is applied whether or not an injection is detected, so untrusted text is uniformly treated as data.
+
+### Case_Status state machine (`lib/caseStatus.ts`)
+
+A single transition guard enforces the allowed `Status_Transition` set on **every** status write across the API and the runner (Requirement 28).
+
+```typescript
+const ALLOWED_TRANSITIONS: Record<CaseStatus, CaseStatus[]> = {
+  New:              ["Investigating"],
+  Investigating:    ["AwaitingApproval", "NeedsHumanInput"],
+  AwaitingApproval: ["AppealSent", "NeedsHumanInput"],
+  NeedsHumanInput:  ["Investigating", "AwaitingApproval"],
+  AppealSent:       ["Resolved", "DeniedFinal"],
+  Resolved:         [],   // terminal (Req 28.4)
+  DeniedFinal:      [],   // terminal (Req 28.4)
+};
+
+interface TransitionResult {
+  ok: boolean;
+  status: CaseStatus;     // the resulting status (unchanged on rejection/no-op)
+  noop?: boolean;         // true for a same-state idempotent transition (Req 28.3)
+  message?: string;       // identifies the illegal transition on rejection (Req 28.2)
+}
+
+// Pure guard evaluated before persisting any status change.
+function assertTransition(from: CaseStatus, to: CaseStatus): TransitionResult;
+```
+
+`assertTransition` returns:
+- **Same-state** (`to === from`) → idempotent no-op success (`ok: true, noop: true`), status unchanged (Req 28.3).
+- **Allowed** (`to` in `ALLOWED_TRANSITIONS[from]`) → success (`ok: true`).
+- **Illegal** (different status not in the allowed set, including any outgoing transition from the terminal `Resolved`/`DeniedFinal`) → rejection (`ok: false`) with the status left unchanged and a message identifying the illegal `Status_Transition` (Req 28.1, 28.2, 28.5).
+
+Callers (the `/action` route, the runner's stage-advancing writes, and Case_Outcome recording) must route every status change through `assertTransition` and persist only when `ok` is true.
+
+### Idempotency store (`lib/idempotency.ts`)
+
+Every mutating operation accepts a client-supplied `Idempotency_Key` and takes effect **at most once**; a retry with an already-seen key returns the stored original result (Requirement 26).
+
+```typescript
+// Runs `op` at most once per key. On a first-seen key, executes op, stores
+// { key, result } atomically with the op's effect, and returns the result.
+// On a replayed key, returns the previously stored result WITHOUT re-running op.
+async function withIdempotency<T>(
+  key: string,
+  op: () => Promise<T>,
+): Promise<T>;
+```
+
+The stored result is keyed by the `Idempotency_Key` in the `IdempotencyKey` model (see Data Models). Storing the result and applying the operation effect happen in one transaction, so a crash between "effect applied" and "result stored" cannot yield a double effect. This wraps appeal submission, appeal approval, Case_Outcome recording, and stage-advancing status writes (Req 26.1–26.5).
+
+### Gold-Case evaluation (`eval/gold/*.json`, `scripts/eval.ts`)
+
+A set of `Gold_Case` fixtures, each pinning a fixed Intake to its expected `Resolution_Path` and expected triggering `Finding` identifier(s), plus a runner that scores each case (Requirement 30).
+
+```typescript
+interface GoldCase {
+  id: string;
+  intake: { text: string; intakeType: string; urgent?: boolean };
+  expectedResolutionPath: ResolutionPath;
+  expectedTriggeringFindingIds: string[]; // stable Finding ids expected to drive the outcome
+}
+
+interface GoldCaseResult {
+  id: string;
+  pass: boolean;                 // true iff BOTH path and triggering ids match (Req 30.3)
+  producedResolutionPath: ResolutionPath;
+  producedTriggeringFindingIds: string[];
+}
+
+// Runs every Gold_Case (with Qwen/DB fakes) and reports per-case pass/fail.
+async function runGoldCases(cases: GoldCase[]): Promise<GoldCaseResult[]>;
+```
+
+Fixtures live under `eval/gold/*.json`; `scripts/eval.ts` (also runnable as a test) loads them, executes each through the runner against deterministic fakes, and reports per-case pass/fail (Req 30.2, 30.3). A `Gold_Case` passes only when the produced `Resolution_Path` **and** the produced triggering `Finding` id(s) equal the expected values; any mismatch is a fail (Req 30.4). CI can gate on `runGoldCases` returning all-pass so a decision-logic regression that breaks a known case is caught automatically.
+
 ### API Routes (`app/api/`)
 
 | Route | Method | Purpose | Requirements |
@@ -356,8 +552,9 @@ function isAtRisk(deadline: Date, now: Date): boolean;          // remaining < 2
 | `/api/cases` | GET | List all cases for the Dashboard | 10.1 |
 | `/api/cases/[id]` | GET | Full case detail: fields, trace steps, recommendation, appeal | 13.1–13.4 |
 | `/api/cases/[id]/trace` | GET | Trace steps created after a `since` timestamp | 11.1–11.3 |
-| `/api/cases/[id]/action` | POST | Human action: approve / edit / request-more-evidence / reject; and Case_Outcome recording (appeal-won / appeal-denied) for AppealSent cases | 8.1–8.7, 16, 24 |
+| `/api/cases/[id]/action` | POST | Human action: approve / edit / request-more-evidence / reject; and Case_Outcome recording (appeal-won / appeal-denied) for AppealSent cases. Accepts an `Idempotency-Key` header; every status change is gated by `assertTransition` | 8.1–8.7, 16, 24, 26, 28 |
 | `/api/cases/[id]/audit/export` | GET | Generate audit-trail PDF | 9.4 |
+| `/api/cases/[id]/audit/verify` | GET | Run `verifyAuditChain(caseId)`; return `{ intact, headHash, firstBrokenEventId?, reason? }` | 25.4–25.7 |
 | `/api/analytics` | GET | Aggregations for the Analytics page (denials grouped by the Case payer reference with an "Unknown payer" bucket) | 14.1–14.4 |
 | `/api/policies/compare` | GET | Policy diffing across payers for a procedure code | 17.1–17.2 |
 | `/api/patients/search` | GET | Global search by patient name | 19.2 |
@@ -366,6 +563,8 @@ function isAtRisk(deadline: Date, now: Date): boolean;          // remaining < 2
 Intake validation (zod): rejects empty text with no file (1.3) and missing intake type (1.4) with a field-identifying message. The schema also accepts an optional `urgent` boolean that defaults to `false` when omitted (Requirement 1.7); the POST `/api/cases` handler sets `Case.isUrgent` from it and computes `slaDeadline` as `slaDeadline(createdAt, urgent)` — createdAt + 72h when urgent, createdAt + 7d otherwise (Requirements 1.8, 1.9, 12.1).
 
 The `/api/cases/[id]/action` route accepts, in addition to the four Human_Action types, two Case_Outcome action types — `appeal_won` and `appeal_denied` — for Cases in status `AppealSent` (Requirement 24). These are handled by extending the existing action route rather than adding a dedicated route, keeping all Case-mutating operator actions behind one validated handler. See Error Handling → Human-in-the-loop for the outcome transition, guard, and rollback rules.
+
+**Idempotency and transition safety on the action route.** Every mutating call to `/action` carries a client-supplied `Idempotency-Key` (header). The handler wraps its effect in `withIdempotency(key, op)`: a first-seen key runs the op once and stores its result with the key; a retry with an already-processed key returns the stored original result without re-running the op, so an approval/submission/outcome/stage-advance is applied at most once across retries (Requirement 26). Independently, every status change the handler performs (approve → `AppealSent`, reject → `NeedsHumanInput`, outcome → `Resolved`/`DeniedFinal`, and any stage-advancing write) is first validated with `assertTransition(from, to)`; illegal transitions are rejected with the status left unchanged and a message identifying the illegal transition, while a same-state request is an idempotent no-op success (Requirement 28). The two mechanisms compose: `assertTransition` decides whether a transition is legal, and `withIdempotency` ensures a legal transition takes effect only once.
 
 ### Frontend Components and Pages
 
@@ -467,9 +666,27 @@ model TraceStep {
   input     Json?
   output    Json?
   reasoning String
+  beforeState Json?  // captured field values before a mutating change (Req 25.3)
+  afterState  Json?  // captured field values after a mutating change (Req 25.3)
+  prevHash  String   // hash of the immediately preceding audit event, or GENESIS_HASH for the first (Req 25.1, 25.2)
+  hash      String   // sha256(prevHash + canonicalSerialize(content)) (Req 25.1)
   timestamp DateTime @default(now())
 }
+
+model IdempotencyKey {
+  key       String   @id            // client-supplied Idempotency_Key (Req 26.1)
+  caseId    String
+  operation String                  // e.g. "approve" | "submit" | "appeal_won" | "advance"
+  result    Json                    // stored original operation result, replayed on retry (Req 26.2, 26.3)
+  createdAt DateTime @default(now())
+}
 ```
+
+**Audit-chain columns.** `TraceStep.prevHash`/`TraceStep.hash` make each Case's ordered Trace_Steps (including `human_action` events) a tamper-evident `Audit_Chain`; `beforeState`/`afterState` capture the before/after of mutating events so the mutation is part of the hashed content (Requirement 25). These are populated by `lib/auditChain.ts` on write and re-walked by `verifyAuditChain`.
+
+**Idempotency store.** `IdempotencyKey` records, keyed by the client-supplied `Idempotency_Key`, the stored result of each mutating operation so retries replay the original result rather than re-applying the effect (Requirement 26).
+
+**Status-transition note.** `Case.status` is a free-text column at the storage layer, but every write goes through `assertTransition` in `lib/caseStatus.ts`, which enforces the allowed-transition table (Requirement 28); the persistence layer never sets a status that the guard has not approved.
 
 ### Domain Enumerations
 
@@ -481,7 +698,9 @@ model TraceStep {
 - `sourceType`: `raw_intake`, `chart_note`, `payer_policy`, `code_lookup`.
 - `stepType` (exactly seven allowed values, Requirements 23.3, 23.6): `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`.
 - `Verification_Result.status`: `pass`, `fail`.
-- `FlaggedIssue.type`: `unsupported_citation`, `reference_mismatch`, `unsupported_claim`, `verification_error`.
+- `FlaggedIssue.type`: `unsupported_citation`, `reference_mismatch`, `unsupported_claim`, `unresolved_citation`, `verification_error`.
+- `Finding_Severity`: `warning`, `blocking`.
+- `Finding.kind`: `contradiction`, `gap`, `policy`, `verification`.
 
 ### Recommendation JSON Shape
 
@@ -520,14 +739,31 @@ Stored on `Case.verificationResult`, retrievable independently of `recommendatio
 
 ```typescript
 interface FlaggedIssue {
-  type: "unsupported_citation" | "reference_mismatch" | "unsupported_claim" | "verification_error";
+  type: "unsupported_citation" | "reference_mismatch" | "unsupported_claim" | "unresolved_citation" | "verification_error";
   reference: string;   // the offending citation / reference / claim
   detail: string;
+  severity: "warning" | "blocking"; // unresolved_citation is blocking (Req 22.9)
 }
 
 interface VerificationResult {
   status: "pass" | "fail";   // pass iff flaggedIssues.length === 0, else fail (Req 22.4)
   flaggedIssues: FlaggedIssue[];
+}
+```
+
+### Finding JSON Shape
+
+Structured contradiction/gap/policy/verification issues carry a stable id and a severity (Requirement 29). Routing depends only on `blocking` findings.
+
+```typescript
+interface Finding {
+  findingId: string;                 // stable identifier
+  kind: "contradiction" | "gap" | "policy" | "verification";
+  severity: "warning" | "blocking";  // contradictions always blocking (Req 29.2)
+  expected?: string;
+  actual?: string;
+  technicalMessage: string;
+  friendlyMessage: string;           // patient/operator-friendly (Req 29.1)
 }
 ```
 
@@ -873,6 +1109,60 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 **Validates: Requirements 24.5**
 
+### Property 57: Qwen transient-vs-permanent retry classification
+
+*For any* sequence of Qwen_Client attempt failures, the client retries with exponential backoff exactly the failures classified as transient — a network error, a per-attempt timeout, or an HTTP 429/500/502/503/504 — up to the 3-attempt total, and it does **not** retry any failure classified as permanent — an HTTP 4xx other than 429, or a malformed or empty response — instead returning a structured failure result on that attempt. Equivalently, `classifyQwenFailure` labels each failure kind transient or permanent per this partition, and the number of attempts is at most 3 for transient runs and exactly the first-failure attempt for a permanent failure.
+
+**Validates: Requirements 6.6, 6.7, 6.8**
+
+### Property 58: Unresolved citations force a blocking verification fail
+
+*For any* generated Appeal_Packet and stored in-scope record set, the Verification_QA grounding check adds an `unresolved_citation` blocking flagged issue for exactly those citations/references (payer-policy clause or id, chart-note evidence, diagnosis/procedure code, patient) that do not resolve to an actual stored record in scope for the Case, and none for those that do; whenever at least one such unresolved reference exists the stored Verification_Result status is `fail` (so the appeal is not presented as verified), and when every reference resolves no grounding issue is produced.
+
+**Validates: Requirements 22.8, 22.9**
+
+### Property 59: Untampered audit chain verifies as intact
+
+*For any* Case whose audit events are recorded through the hash-chain writer — the first event's prevHash equal to `GENESIS_HASH` and each subsequent event's prevHash equal to the previous event's stored hash, with every hash computed over the canonical serialization of the event content — `verifyAuditChain` reports `intact: true` and returns a head hash equal to the stored hash of the most recent event.
+
+**Validates: Requirements 25.1, 25.2, 25.7**
+
+### Property 60: Tampering breaks the chain and the first broken event is identified
+
+*For any* validly built audit chain in which a single event's hashed content is altered (recomputed hash ≠ stored hash) or a single event's stored prevHash is altered (prevHash ≠ preceding event's stored hash), `verifyAuditChain` reports `intact: false` and identifies the first broken audit event as the earliest event at which a mismatch occurs.
+
+**Validates: Requirements 25.5, 25.6**
+
+### Property 61: Mutating operations are idempotent under a repeated key
+
+*For any* mutating operation and any Idempotency_Key, invoking the operation twice with the same key applies the operation's effect at most once and both invocations return the stored original result, while invoking the operation with distinct keys applies each effect independently.
+
+**Validates: Requirements 26.2, 26.3, 26.4, 26.5**
+
+### Property 62: Safety guard fences untrusted content and detects injection deterministically
+
+*For any* untrusted text, `screenUntrusted` returns the content fenced and labeled as data (never as instructions) and sets `injectionDetected` true if and only if the text matches at least one of the deterministic prompt-injection / instruction-override patterns (computed with no language-model call); on detection the runner records a Trace_Step flagging the attempt, and in all cases the content is supplied only as data.
+
+**Validates: Requirements 27.2, 27.3, 27.4, 27.5**
+
+### Property 63: Status transitions obey the allowed-transition table
+
+*For any* (from-status, to-status) pair, `assertTransition` accepts the transition if and only if the to-status is in the allowed set for the from-status; a rejected (illegal) transition leaves the Case_Status unchanged and returns a message identifying the illegal transition; a same-state request (to-status equals from-status) is an idempotent no-op success leaving the status unchanged; and every outgoing transition from a terminal status (`Resolved`, `DeniedFinal`) to a different status is rejected.
+
+**Validates: Requirements 28.1, 28.2, 28.3, 28.4, 28.5**
+
+### Property 64: Escalation is driven only by blocking findings
+
+*For any* set of Findings, the Case is routed to `Escalate_To_Human` / `NeedsHumanInput` by findings if and only if at least one Finding has severity `blocking` (contradictions always contribute a blocking finding); a set containing only `warning` findings never forces escalation, and the `contradictionCount` supplied to the Decision_Engine equals the number of blocking findings.
+
+**Validates: Requirements 29.2, 29.4, 29.5**
+
+### Property 65: Gold-case evaluation passes iff path and triggering findings match
+
+*For any* Gold_Case, the evaluation reports pass if and only if the produced Resolution_Path equals the expected Resolution_Path **and** the produced triggering Finding identifier(s) equal the expected triggering Finding identifier(s); any difference in either the path or the triggering finding id(s) is reported as a fail.
+
+**Validates: Requirements 30.2, 30.3, 30.4**
+
 ## Error Handling
 
 ### Intake and API validation
@@ -883,8 +1173,9 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 ### Qwen client failures
 
-- `callQwen` retries on transient failure up to 2 additional times (3 attempts total, Requirement 6.5). Retries use short backoff.
-- After exhausting retries, `callQwen` throws `QwenUnavailableError`. The Agent_Runner catches it, records a failure Trace_Step, and forces `Escalate_To_Human` with status `NeedsHumanInput` so the Case is never left stuck in `Investigating`.
+- Each attempt runs under a bounded per-attempt timeout (`QWEN_ATTEMPT_TIMEOUT_MS`); an elapsed timeout is classified as a `timeout` transient failure (Requirement 6.6).
+- `classifyQwenFailure` partitions failures into **transient** (network error, timeout, HTTP 429/500/502/503/504) and **permanent** (HTTP 4xx other than 429, malformed body, empty body). `callQwen` retries only transient failures, using exponential backoff, up to the 3-attempt total (Requirements 6.5, 6.7); a permanent failure returns a structured `QwenFailure` immediately on that attempt with no further retry (Requirement 6.8).
+- `callQwen` resolves to a structured `QwenFailure` (it does not throw) when retries are exhausted or a permanent failure is hit. The Agent_Runner inspects the outcome and, on any `QwenFailure`, records a failure Trace_Step and degrades the calling stage gracefully by forcing `Escalate_To_Human` with status `NeedsHumanInput`, so the Case is never left stuck in `Investigating` or terminated abnormally (Requirement 6.9).
 
 ### Tool failures
 
@@ -907,8 +1198,33 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 ### Verification_QA handling
 
-- If the Verification_QA stage cannot complete its checks due to a processing error, it stores `verificationResult = { status: "fail", flaggedIssues: [{ type: "verification_error", ... }] }` and the Case is not presented for Human_Approval as verified (Requirement 22.7).
+- If the Verification_QA stage cannot complete its checks due to a processing error, it stores `verificationResult = { status: "fail", flaggedIssues: [{ type: "verification_error", severity: "blocking", ... }] }` and the Case is not presented for Human_Approval as verified (Requirement 22.7).
+- **Citation grounding.** Beyond support checks, every citation and reference (payer-policy clause/id, chart-note evidence, diagnosis/procedure code, patient) must resolve to an actual stored record in scope for the Case. Any reference that does not resolve is recorded as an `unresolved_citation` blocking flagged issue, which forces `status: "fail"` so the appeal is not presented as verified (Requirements 22.8, 22.9).
 - Human_Approval is gated on a stored `verificationResult`; a Case cannot enter the verified `AwaitingApproval` state before Verification_QA has run (Requirement 22.5).
+
+### Findings and severity-based routing
+
+- Contradictions, gaps, policy issues, and verification issues are recorded as structured `Finding`s with a stable id and a severity; contradictions are always `blocking`, and verification flagged issues (including `unresolved_citation`) are `blocking` or `warning` by their effect on appeal validity (Requirements 29.1–29.3).
+- The `contradictionCount` supplied to the Decision_Engine is the count of `blocking` findings, so escalation to `Escalate_To_Human` / `NeedsHumanInput` happens if and only if at least one blocking finding exists; `warning` findings are surfaced in the human action zone without forcing escalation (Requirements 29.4, 29.5).
+
+### Audit-chain integrity
+
+- Every audit event (Trace_Step / human_action) is written with `prevHash` and `hash` computed over the canonical serialization of its content; the first event's `prevHash` is `GENESIS_HASH`, and mutating events capture before/after state (Requirements 25.1–25.3).
+- `verifyAuditChain(caseId)` re-walks the chain and returns `{ intact, headHash }`; on a recomputed-hash mismatch or a prevHash-linkage mismatch it reports `intact: false` and identifies the earliest broken event, and reports `intact: true` with the head hash when no mismatch is found (Requirements 25.4–25.7). The `/api/cases/[id]/audit/verify` route surfaces this result. Verification is read-only and never mutates the stored chain.
+
+### Idempotent mutating operations
+
+- Mutating operations (appeal submission, approval, Case_Outcome recording, stage-advancing status writes) require a client-supplied `Idempotency-Key` and run through `withIdempotency(key, op)` (Requirement 26.1).
+- A first-seen key applies the effect once and stores the result with the key in one transaction; a retry with an already-processed key returns the stored original result without re-applying the effect, so no appeal is submitted twice and no Case_Status is advanced twice (Requirements 26.2–26.5).
+
+### Untrusted content safety guard
+
+- Raw Intake / extracted document text is screened by `screenUntrusted` before it is placed into any Qwen prompt (Requirement 27.1); the guard always fences the content as data (Requirement 27.2) and detects injection/override patterns with deterministic rules and no model call (Requirement 27.3).
+- On detection, a Trace_Step flagging the injection attempt is recorded and the content is only ever supplied as data, never promoted to instructions (Requirements 27.4, 27.5).
+
+### Status-transition safety
+
+- Every Case_Status write is validated by `assertTransition(from, to)` against the allowed-transition table (Requirement 28.1). An illegal transition is rejected with the status left unchanged and a message identifying the illegal transition (Requirement 28.2); a same-state request is an idempotent no-op success (Requirement 28.3); and `Resolved`/`DeniedFinal` are terminal with no outgoing transition, so any attempt to leave them is rejected (Requirements 28.4, 28.5).
 
 ### Trace step and pipeline-data persistence
 
@@ -935,12 +1251,13 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 ### Dual approach
 
-- **Property-based tests** verify the 56 universal properties above across many generated inputs. They target the pure and near-pure logic: the Decision_Engine, SLA computations, entity/field invariants, contradiction/stale/gap detection, trace filtering and merging, aggregation, search, and the runner's decision/PDF/human-action side-effect rules (with Qwen and Prisma mocked/in-memory where needed). The multi-stage additions are covered too: stage ordering (36), parallel review overlap (37), unresolved-field tracing (38), per-stage labeling (39, 41), stage-failure escalation (40), stage-scoped tool access (42), strategy win-probability range/ordering/fallback (43–45), verification detection/definition/gating/error handling (46–49), and pipeline-data persistence/restriction (50–52). The gap-closure additions are covered by the urgent-driven SLA deadline (30) and denials-by-payer bucketing (32), patient/payer linkage (53), and case-outcome transitions, rejection guard, and rollback atomicity (54–56).
+- **Property-based tests** verify the 65 universal properties above across many generated inputs. They target the pure and near-pure logic: the Decision_Engine, SLA computations, entity/field invariants, contradiction/stale/gap detection, trace filtering and merging, aggregation, search, and the runner's decision/PDF/human-action side-effect rules (with Qwen and Prisma mocked/in-memory where needed). The multi-stage additions are covered too: stage ordering (36), parallel review overlap (37), unresolved-field tracing (38), per-stage labeling (39, 41), stage-failure escalation (40), stage-scoped tool access (42), strategy win-probability range/ordering/fallback (43–45), verification detection/definition/gating/error handling (46–49), and pipeline-data persistence/restriction (50–52). The gap-closure additions are covered by the urgent-driven SLA deadline (30) and denials-by-payer bucketing (32), patient/payer linkage (53), and case-outcome transitions, rejection guard, and rollback atomicity (54–56). The hardening additions are covered by Qwen transient-vs-permanent retry classification (57), verification citation grounding (58), audit-chain intactness and tamper localization (59, 60), idempotent mutating operations (61), the deterministic safety guard's fencing and injection detection (62), status-transition legality (63), blocking-findings-only routing (64), and gold-case evaluation pass/fail (65).
 - **Example-based unit tests** cover specific behaviors and edge cases: intake redirect, async immediate-return, the urgent-flag toggle defaulting to off on the intake form (Requirement 1.7), UI rendering of panels/cards/badges, source-tag expansion, polling cadence, the diagnosis-code-unavailable edge case (Requirement 3.7), the `LiveTracePanel` stage icon/label rendering for each stepType (Requirements 11.5, 20.7–20.10), the `HumanActionZone` flagged-issue display on verification fail (Requirement 22.6), the `HumanActionZone` Appeal Won / Appeal Denied controls appearing only for `AppealSent` cases (Requirement 24.1), the retention of `resolvedAt` feeding resolution-rate and average-time-to-resolution analytics (Requirement 24.6), that Intake_And_Extraction resolves the five fields in one stage (Requirement 20.3), and that the Strategy stage invokes `checkPriorAuthHistory` and consumes the policy diff (Requirements 21.1, 17.3).
 - **Integration tests** cover I/O and library-bound behavior with 1–3 examples: PDF text extraction on intake (1.2), appeal and audit PDF generation (7.4, 9.4), and the NIH lookup happy path (3.3).
 - **Smoke/architectural tests** cover one-shot setup and wiring guarantees: seed content assertions and demo reset (Requirements 18.1–18.5); that the tool registry contains only the five existing tools (Requirement 20.11); that the pipeline defines exactly the nine named stages with no separate Learning/Memory/Document/Entity/Orchestrator Qwen call (Requirement 20.12); and that Decision_Intelligence and Appeal_Generation receive summary/decision objects rather than raw documents (Requirements 5.2, 7.2).
+- **Behavioral evaluation (gold cases).** `scripts/eval.ts` loads the `eval/gold/*.json` fixtures and runs `runGoldCases` against deterministic fakes, reporting per-case pass/fail (Property 65, Requirements 30.1–30.4). This is run as a test and can gate CI so a decision-logic change that breaks a known case fails the build.
 
-**Stage parallelism** (Property 37) is validated as a property using deterministic fakes that record each stage's start/end timestamps and asserting interval overlap, rather than relying on wall-clock timing. **UI stage labeling** (11.5, 22.6) is validated with component/example tests, consistent with the guidance that UI rendering is not suitable for PBT.
+**Stage parallelism** (Property 37) is validated as a property using deterministic fakes that record each stage's start/end timestamps and asserting interval overlap, rather than relying on wall-clock timing. **UI stage labeling** (11.5, 22.6) is validated with component/example tests, consistent with the guidance that UI rendering is not suitable for PBT. **Qwen degradation on structured failure** (Requirement 6.9) is validated with an example test that feeds a structured `QwenFailure` into the runner and asserts `Escalate_To_Human` / `NeedsHumanInput`.
 
 ### Property-based testing library and configuration
 
@@ -949,7 +1266,7 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 - Each property test runs a **minimum of 100 iterations** (`{ numRuns: 100 }` or higher).
 - Each property test is tagged with a comment referencing its design property in the format:
   `// Feature: authpilot, Property {number}: {property_text}`
-- Each of the 56 correctness properties is implemented by a **single** property-based test.
+- Each of the 65 correctness properties is implemented by a **single** property-based test.
 - External dependencies (Qwen, NIH API) are replaced with deterministic fakes; the database uses an in-memory/temporary SQLite instance so property tests stay fast and cheap enough for 100+ iterations.
 
 ### Generators
@@ -966,6 +1283,14 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 - **Strategy generator**: prior-auth histories (including empty) and payer track records, for win-probability count/range, ordering, and fallback properties (43–45).
 - **Appeal/verification generator**: appeal packets with a mix of supported and injected-unsupported citations, matched and mismatched references (vs generated Extracted_Fields), and supported/unsupported claims, plus a verification-error flag, for the verification detection/definition/error properties (46, 47, 49).
 - **stepType generator**: values drawn from inside and outside the seven allowed step types, for the trace-step restriction property (51).
+- **Qwen-failure generator**: sequences of attempt failures drawn from the transient kinds (network, timeout, HTTP 429/500/502/503/504) and permanent kinds (HTTP 4xx≠429, malformed, empty), for the retry-classification property (57) — asserting transient runs retry up to 3 attempts and permanent failures stop immediately with a structured failure.
+- **Grounding generator**: appeal packets whose citations/references (payer-policy clause/id, chart-note, dx/procedure code, patient) either resolve or do not resolve against a generated in-scope stored-record set, for the citation-grounding property (58).
+- **Audit-event / tamper generator**: ordered audit-event content sequences from which a valid hash chain is built (genesis + linked hashes), plus a mutation that alters exactly one event's content or one event's prevHash at a random position, for the chain-intact (59) and tamper-localization (60) properties.
+- **Idempotency-key generator**: keys (repeated and distinct) paired with mutating operations and injectable interleavings/failures, for the idempotency property (61).
+- **Injection-text generator**: untrusted text mixing known prompt-injection / instruction-override patterns with benign content, for the safety-guard fencing/detection property (62).
+- **Status-transition generator**: all (from-status, to-status) pairs across the seven statuses, including same-state and terminal-outgoing pairs, for the transition-legality property (63).
+- **Finding-severity generator**: sets of Findings mixing `warning` and `blocking` severities (including contradiction findings that are always blocking), for the severity-based routing property (64).
+- **Gold-case fixtures**: the `eval/gold/*.json` set, each with a fixed intake, expected Resolution_Path, and expected triggering Finding id(s), for the gold-case evaluation property (65).
 
 ### Coverage mapping
 
