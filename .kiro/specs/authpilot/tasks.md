@@ -2,32 +2,42 @@
 
 ## Overview
 
-This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repository backed by SQLite via Prisma. Work proceeds bottom-up: project scaffolding and data layer first, then the pure/near-pure logic modules (Decision_Engine, SLA_Clock) that carry most of the correctness properties, then the Qwen client and agent tools, then the bounded Agent_Runner, then the API routes, and finally the frontend pages and seed/demo data. Each step builds on the previous one and ends by wiring the new code into the running app. Property-based tests (fast-check, Vitest, ≥100 iterations) sit next to the logic they validate; example, integration, and smoke tests cover UI, library-bound, and one-shot setup behavior.
+This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repository backed by SQLite via Prisma. Work proceeds bottom-up: project scaffolding and data layer first, then the pure/near-pure logic modules (Decision_Engine, SLA_Clock) that carry most of the correctness properties, then the Qwen client and agent tools, then the ordered nine-stage `Agent_Runner` pipeline (Intake_And_Extraction → parallel Medical_Review/Policy_Review → Strategy → Decision_Intelligence → Appeal_Generation → Verification_QA → Human_Approval → Submission_And_Tracking), then the API routes, and finally the frontend pages and seed/demo data. Each step builds on the previous one and ends by wiring the new code into the running app. Property-based tests (fast-check, Vitest, ≥100 iterations) sit next to the logic they validate; example, integration, and smoke tests cover UI, library-bound, one-shot setup, and architectural-wiring behavior.
 
 ## Tasks
 
 - [ ] 1. Scaffold project and shared foundations
   - Initialize a Next.js 14 (App Router) + TypeScript project with Tailwind, shadcn/ui, Recharts, and Framer Motion
   - Add Vitest and fast-check; configure a test script and a shared fast-check config (`{ numRuns: 100 }`)
-  - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `intakeType`, `sourceType`, `stepType`, `Recommendation`, `AppealContent`
-  - _Requirements: 5.6, 5.7, 5.8_
+  - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `PipelineStage`, `intakeType`, `sourceType`, `stepType` (the seven allowed values), `Recommendation`, `AppealContent`, `StrategyOption`/`StrategyOptions`, `FlaggedIssue`/`VerificationResult`
+  - _Requirements: 5.7, 5.8, 5.9, 23.3_
 
 - [ ] 2. Define the data layer with Prisma
   - [ ] 2.1 Author the Prisma schema and generate the client
-    - Define `Patient`, `ChartNote`, `Payer`, `PayerPolicy`, `Case`, `ExtractedField`, `TraceStep` models per the design, including `Case.isUrgent`, `resolutionPath`, `denialReason`, `requestedEvidence`, `plainEnglishExplanation`, `recommendation`, `appealPdfUrl`, `resolvedAt`
+    - Define `Patient`, `ChartNote`, `Payer`, `PayerPolicy`, `Case`, `ExtractedField`, `TraceStep` models per the design, including `Case.isUrgent`, `resolutionPath`, `denialReason`, `requestedEvidence`, `plainEnglishExplanation`, `recommendation`, `appealPdfUrl`, `resolvedAt`, and the multi-stage pipeline fields `Case.strategyOptions` (Json?) and `Case.verificationResult` (Json?)
+    - Extend `TraceStep.stepType` to allow the seven values `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`
     - Configure SQLite datasource and add a shared Prisma client module in `lib/db.ts`
     - Add a test helper that spins up an in-memory/temporary SQLite instance for tests
-    - _Requirements: 2.2, 9.1, 9.2_
+    - _Requirements: 2.2, 9.1, 23.1, 23.2, 23.3_
+
+  - [ ] 2.2 Implement the stepType validation guard
+    - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
+    - _Requirements: 23.3, 23.6_
+
+  - [ ]* 2.3 Write property test for trace step type restriction
+    - **Property 51: Trace step type restriction**
+    - **Validates: Requirements 23.3, 23.6**
+    - Use the stepType generator (values inside and outside the seven allowed values)
 
 - [ ] 3. Implement the Decision_Engine (pure logic)
   - [ ] 3.1 Implement `decide()` in `lib/decisionEngine.ts`
     - Evaluate rules in order: iterations-exhausted OR contradictionCount > 0 → Escalate_To_Human (NeedsHumanInput); confidence > 85 → Auto_Draft (AwaitingApproval); 60 ≤ confidence ≤ 85 → Draft_And_Request_Evidence (AwaitingApproval); confidence < 60 → Escalate_To_Human (NeedsHumanInput)
     - Return `{ path, status }` with status derived from path
-    - _Requirements: 4.4, 5.2, 5.3, 5.4, 5.6, 5.7, 5.8_
+    - _Requirements: 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9_
 
   - [ ]* 3.2 Write property test for the Decision_Engine mapping
     - **Property 14: Decision engine mapping**
-    - **Validates: Requirements 4.4, 5.2, 5.3, 5.4, 5.6, 5.7, 5.8**
+    - **Validates: Requirements 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9**
     - Use the decision-input generator with emphasis on the 60 and 85 boundaries
 
   - [ ] 3.3 Implement `computeOverallConfidence()` in `lib/decisionEngine.ts`
@@ -105,11 +115,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [ ] 8. Implement the appeal PDF generator
   - [ ] 8.1 Implement `generateAppealPdf()` in `lib/appealPdf.ts`
     - Use pdf-lib to render an appeal citing the denial reason, referenced Payer_Policy clause, and supporting Chart_Note evidence; persist the file and return `{ url }`
-    - _Requirements: 7.2, 7.3_
+    - _Requirements: 7.3, 7.4_
 
   - [ ]* 8.2 Write property test for appeal citation completeness
     - **Property 20: Appeal packet cites required evidence**
-    - **Validates: Requirements 7.2**
+    - **Validates: Requirements 7.3**
 
   - [ ]* 8.3 Write integration test for appeal PDF generation and storage
     - Generate a PDF for a sample case and assert a non-empty stored location reference
@@ -151,39 +161,131 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 13: Stale chart notes are flagged at the 90-day boundary**
     - **Validates: Requirements 4.3**
 
-- [ ] 11. Implement the Agent_Runner (bounded loop)
-  - [ ] 11.1 Implement `runAgent()` loop and orchestration in `lib/agentRunner.ts`
-    - Set status Investigating; build system prompt + seed messages (raw intake plus `extraContext` on re-runs); loop up to 8 iterations calling Qwen, dispatching tools, and persisting Trace_Steps + Extracted_Fields each iteration before the next call; break on final decision
-    - On loop exhaustion without a decision, force Escalate_To_Human and record a Trace_Step with reasoning "needs manual review"; catch `QwenUnavailableError` and escalate
-    - _Requirements: 6.1, 6.2, 6.3, 6.4_
+- [ ] 11. Implement the Agent_Runner nine-stage pipeline
+  - [ ] 11.1 Implement pipeline scaffolding and stage orchestration in `lib/agentRunner.ts`
+    - Define the `PipelineStage` union and a `runStage(caseId, stage, ...)` helper that runs a bounded (≤ 8 iteration) plan→tool_call→observe cycle under a stage-specific system prompt and the stage's tool allow-list, tagging every Trace_Step it writes with the stage; sequence the stages in order (Intake_And_Extraction → Medical_Review/Policy_Review → Strategy → Decision_Intelligence → Appeal_Generation → Verification_QA), persisting each iteration's Trace_Steps/Extracted_Fields before the next call
+    - On loop exhaustion without a decision, force Escalate_To_Human and record a Trace_Step with reasoning "needs manual review"; catch `QwenUnavailableError` and escalate; if any stage throws, record a failure Trace_Step naming the affected stage, set Escalate_To_Human, and do not run subsequent stages
+    - _Requirements: 6.1, 6.2, 6.3, 6.4, 20.1, 20.5, 20.6_
 
   - [ ]* 11.2 Write property test for the loop cap forcing escalation
     - **Property 17: Loop cap forces escalation**
     - **Validates: Requirements 6.4**
 
-  - [ ] 11.3 Wire decision, tracing, PDF, and status side-effects into the runner
-    - Call `decide()`, persist a `decision` Trace_Step (overall confidence, path, reasoning); on Auto_Draft / Draft_And_Request_Evidence generate the appeal PDF, store `appealPdfUrl`, set AwaitingApproval (recording requested evidence for the medium path); on Escalate_To_Human set NeedsHumanInput
-    - _Requirements: 5.5, 5.6, 5.7, 5.8, 7.1_
+  - [ ] 11.3 Implement stage-scoped tool allow-lists in `dispatchTool`
+    - Add the `STAGE_TOOLS` map and extend `dispatchTool(name, args, stage)` to permit a tool only when it is in the active stage's allow-list, recording a failure `Trace_Step` for any refused tool; restrict Medical_Review to `fetchPatientRecord` only and Policy_Review to `fetchPayerPolicy` only
+    - _Requirements: 3.8, 3.9_
 
-  - [ ]* 11.4 Write property test for decision tracing
+  - [ ]* 11.4 Write property test for stage-scoped tool access
+    - **Property 42: Stage-scoped tool access**
+    - **Validates: Requirements 3.8, 3.9**
+
+  - [ ] 11.5 Implement the Intake_And_Extraction stage
+    - In a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as Extracted_Fields (merging the former document + entity steps into one call); for any of the five that cannot be resolved, record a Trace_Step naming each unresolved field and continue the pipeline without terminating the Case
+    - _Requirements: 20.3, 20.4, 20.12_
+
+  - [ ]* 11.6 Write property test for unresolved intake fields traced without terminating
+    - **Property 38: Unresolved intake fields are traced without terminating**
+    - **Validates: Requirements 20.4**
+
+  - [ ] 11.7 Implement the parallel Medical_Review and Policy_Review stages
+    - Run `Promise.all([runStage(..., "Medical_Review"), runStage(..., "Policy_Review")])` so each begins before the other completes; Medical_Review is scoped to `fetchPatientRecord` and writes `stepType: "medical_review"`, Policy_Review is scoped to `fetchPayerPolicy` and writes `stepType: "policy_review"`; each produces a summary consumed downstream
+    - _Requirements: 20.2, 20.7, 20.8_
+
+  - [ ]* 11.8 Write property test for Medical and Policy review overlap
+    - **Property 37: Medical and Policy reviews overlap**
+    - **Validates: Requirements 20.2**
+
+  - [ ] 11.9 Implement the Strategy stage
+    - Invoke `checkPriorAuthHistory(patientId)` and use payer-specific track record plus multi-payer policy diffing as an input; compute 1–5 candidate approaches each with an integer win-probability (0–100); when history is empty or the tool fails, fall back to payer track record only and set `usedPriorAuthHistory: false`; store `strategyOptions` ordered by descending win-probability; write `stepType: "strategy"`; provide the Strategy_Options summary to Decision_Intelligence
+    - _Requirements: 17.3, 20.9, 21.1, 21.2, 21.3, 21.4, 21.5, 23.1_
+
+  - [ ]* 11.10 Write property test for win-probability count and range
+    - **Property 43: Win-probability count and range**
+    - **Validates: Requirements 21.2**
+
+  - [ ]* 11.11 Write property test for strategy options ordered by descending win-probability
+    - **Property 44: Strategy options ordered by descending win-probability**
+    - **Validates: Requirements 21.4**
+
+  - [ ]* 11.12 Write property test for the strategy fallback when history is unavailable
+    - **Property 45: Strategy fallback when history is unavailable**
+    - **Validates: Requirements 21.3**
+
+  - [ ] 11.13 Implement the Decision_Intelligence stage
+    - Call the pure `decide()` over the Medical_Review, Policy_Review, and Strategy summaries (not raw documents); persist a `decision` Trace_Step storing overall confidence, path, and reasoning; on Auto_Draft/Draft_And_Request_Evidence set AwaitingApproval (recording requested evidence for the medium path) and on Escalate_To_Human set NeedsHumanInput
+    - _Requirements: 5.2, 5.6, 5.7, 5.8, 5.9_
+
+  - [ ]* 11.14 Write property test for decision tracing
     - **Property 16: Decisions are traced**
-    - **Validates: Requirements 5.5**
+    - **Validates: Requirements 5.6**
 
-  - [ ]* 11.5 Write property test for conditional appeal generation
+  - [ ] 11.15 Implement the Appeal_Generation stage
+    - For Auto_Draft / Draft_And_Request_Evidence, generate the appeal PDF from the Decision_Intelligence stage output and store `appealPdfUrl`; skip generation on Escalate_To_Human
+    - _Requirements: 7.1, 7.2_
+
+  - [ ]* 11.16 Write property test for conditional appeal generation
     - **Property 19: Appeal PDF generated only on drafting paths**
     - **Validates: Requirements 7.1**
 
-  - [ ]* 11.6 Write property test for appeal location storage
+  - [ ]* 11.17 Write property test for appeal location storage
     - **Property 21: Appeal location is stored**
-    - **Validates: Requirements 7.3**
+    - **Validates: Requirements 7.4**
 
-  - [ ] 11.7 Produce the plain-English explanation and store the recommendation
+  - [ ] 11.18 Implement the Verification_QA stage
+    - Independently check every citation against retrieved Payer_Policy/Chart_Note data, every patient/policy/code reference against the Case Extracted_Field values, and every claim against the retrieved evidence; collect all flagged issues; derive `status` as `pass` iff the list is empty else `fail`; on a processing error store `{ status: "fail", flaggedIssues: [{ type: "verification_error", ... }] }`; store `verificationResult`, write `stepType: "verification"`, and only set the verified AwaitingApproval state after the result is stored
+    - _Requirements: 20.10, 22.1, 22.2, 22.3, 22.4, 22.5, 22.7, 23.2_
+
+  - [ ]* 11.19 Write property test for verification flagging all discrepancies
+    - **Property 46: Verification flags all discrepancies**
+    - **Validates: Requirements 22.1, 22.2, 22.3**
+
+  - [ ]* 11.20 Write property test for the verification pass/fail definition
+    - **Property 47: Verification pass/fail definition**
+    - **Validates: Requirements 22.4**
+
+  - [ ]* 11.21 Write property test for verification gating human approval
+    - **Property 48: Verification gates human approval**
+    - **Validates: Requirements 22.5**
+
+  - [ ]* 11.22 Write property test for verification processing error yielding a fail result
+    - **Property 49: Verification processing error yields a fail result**
+    - **Validates: Requirements 22.7**
+
+  - [ ] 11.23 Produce the plain-English explanation and store the recommendation
     - Generate a non-empty plain-English explanation of the denial reason and next steps; store the recommendation JSON and explanation on the Case
     - _Requirements: 15.1_
 
-  - [ ]* 11.8 Write property test for plain-English explanation production
+  - [ ]* 11.24 Write property test for plain-English explanation production
     - **Property 33: Plain-English explanation is always produced**
     - **Validates: Requirements 15.1**
+
+  - [ ] 11.25 Wire failure-safe persistence of strategyOptions and verificationResult
+    - Persist `strategyOptions` and `verificationResult` through the guarded persistence path; if either persistence fails, record a failure `Trace_Step` and retain the existing Case `recommendation` unchanged (never overwrite it)
+    - _Requirements: 23.5_
+
+  - [ ]* 11.26 Write property test for persistence failure preserving the recommendation
+    - **Property 52: Persistence failure preserves the recommendation**
+    - **Validates: Requirements 23.5**
+
+  - [ ]* 11.27 Write property test for pipeline stage ordering
+    - **Property 36: Pipeline stage ordering**
+    - **Validates: Requirements 20.1**
+
+  - [ ]* 11.28 Write property test for every executed stage emitting a labeled trace step
+    - **Property 39: Every executed stage emits a labeled trace step**
+    - **Validates: Requirements 20.5**
+
+  - [ ]* 11.29 Write property test for stage failure escalating and halting the pipeline
+    - **Property 40: Stage failure escalates and halts the pipeline**
+    - **Validates: Requirements 20.6**
+
+  - [ ]* 11.30 Write property test for per-stage trace labeling
+    - **Property 41: Per-stage trace labeling**
+    - **Validates: Requirements 20.7, 20.8, 20.9, 20.10**
+
+  - [ ]* 11.31 Write smoke/architectural tests for pipeline wiring guarantees
+    - Assert the tool registry contains only the five existing tools (20.11); the pipeline defines exactly the nine named stages with no separate Learning/Memory/Document/Entity/Orchestrator Qwen call (20.12); Decision_Intelligence and Appeal_Generation receive summary/decision objects rather than raw documents (5.2, 7.2); Intake_And_Extraction resolves the five fields in one stage (20.3); and the Strategy stage invokes `checkPriorAuthHistory` and consumes the multi-payer policy diff (21.1, 17.3)
+    - _Requirements: 5.2, 7.2, 17.3, 20.3, 20.11, 20.12, 21.1_
 
 - [ ] 12. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
@@ -223,8 +325,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 11.3**
 
   - [ ] 14.5 Implement the audit merge and `GET /api/cases/[id]/audit/export`
-    - Merge Extracted_Field and Trace_Step records chronologically (non-decreasing by timestamp, lossless); generate an audit-trail PDF for export
-    - _Requirements: 9.3, 9.4_
+    - Merge Extracted_Field and Trace_Step records chronologically (non-decreasing by timestamp, lossless); return the persisted `strategyOptions` and `verificationResult` for the Case unchanged from what the Strategy and Verification_QA stages stored, retrievable independently of the recommendation; generate an audit-trail PDF for export
+    - _Requirements: 9.3, 9.4, 23.4_
 
   - [ ]* 14.6 Write property test for chronological, lossless audit merge
     - **Property 27: Audit trail is chronological and lossless**
@@ -249,6 +351,10 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - [ ]* 14.11 Write property test for global search filtering
     - **Property 35: Global search filters by patient name**
     - **Validates: Requirements 19.2**
+
+  - [ ]* 14.12 Write property test for lossless strategy/verification persistence and retrieval
+    - **Property 50: Strategy and verification outputs persist and retrieve losslessly**
+    - **Validates: Requirements 23.1, 23.2, 23.4**
 
 - [ ] 15. Implement the human-action API
   - [ ] 15.1 Implement `POST /api/cases/[id]/action`
@@ -307,12 +413,12 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 
 - [ ] 20. Implement the Case Detail page
   - [ ] 20.1 Build `app/case/[id]/page.tsx` facts panel, live trace, and action zone
-    - `CaseFactsPanel` (extracted fields with confidence chips and expandable source tags); `LiveTracePanel` polling `/trace` every 1s while Investigating with Framer Motion entrance; `HumanActionZone` (recommendation + Approve/Edit/Request More Evidence/Reject + appeal PDF preview/download + plain-English explanation) wired to `/action`
-    - _Requirements: 8.1, 11.1, 11.2, 11.4, 13.1, 13.2, 13.3, 13.4, 15.2_
+    - `CaseFactsPanel` (extracted fields with confidence chips and expandable source tags); `LiveTracePanel` polling `/trace` every 1s while Investigating with Framer Motion entrance, labeling each trace line with a stage icon/label derived from its `stepType` (🩺 medical_review, 📚 policy_review, 🎯 strategy, ✅ verification, 🤖 decision, plus the tool name for tool_call steps); `HumanActionZone` (recommendation + Approve/Edit/Request More Evidence/Reject + appeal PDF preview/download + plain-English explanation) wired to `/action`, displaying each flagged issue alongside the recommendation when the stored `verificationResult.status` is `fail`
+    - _Requirements: 7.5, 8.1, 11.1, 11.2, 11.4, 11.5, 13.1, 13.2, 13.3, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6_
 
-  - [ ]* 20.2 Write component tests for panels, polling, and source expansion
-    - Assert fact/source-tag expansion, 1s trace polling and chronological append, action buttons in AwaitingApproval, appeal preview/download when present, and plain-English display
-    - _Requirements: 11.1, 11.2, 11.4, 13.2, 13.4, 15.2_
+  - [ ]* 20.2 Write component tests for panels, polling, stage labels, and flagged issues
+    - Assert fact/source-tag expansion, 1s trace polling and chronological append, per-stepType stage icon/label rendering in the live trace (11.5, 20.7–20.10), action buttons in AwaitingApproval, appeal preview/download when present, plain-English display, and flagged-issue display in HumanActionZone when `verificationResult.status` is `fail` (22.6)
+    - _Requirements: 11.1, 11.2, 11.4, 11.5, 13.2, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6_
 
 - [ ] 21. Implement the Audit and Analytics pages
   - [ ] 21.1 Build `app/case/[id]/audit/page.tsx` and `app/analytics/page.tsx`
@@ -338,10 +444,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation tasks are never optional.
-- Each task references specific granular requirements for traceability, and every one of the 35 correctness properties maps to exactly one property-based test sub-task.
-- Property-based tests use fast-check with Vitest at ≥100 iterations, tagged `// Feature: authpilot, Property {number}: {property_text}`; Qwen and the NIH API are replaced with deterministic fakes and the database uses an in-memory/temporary SQLite instance.
-- UI, library-bound (PDF/text extraction), and one-shot setup behaviors are covered by component, integration, and smoke tests rather than property tests, consistent with the design's testing strategy.
-- Checkpoints ensure incremental validation at natural boundaries (pure logic, tools/PDF, runner, APIs, and final).
+- Each task references specific granular requirements for traceability, and every one of the 52 correctness properties maps to exactly one property-based test sub-task.
+- Property-based tests use fast-check with Vitest at ≥100 iterations, tagged `// Feature: authpilot, Property {number}: {property_text}`; Qwen and the NIH API are replaced with deterministic fakes and the database uses an in-memory/temporary SQLite instance. Stage parallelism (Property 37) is validated with instrumented per-stage start/end timestamps rather than wall-clock timing.
+- Architectural/wiring guarantees (Requirements 5.2, 7.2, 17.3, 20.3, 20.11, 20.12) and UI stage labeling / flagged-issue rendering (Requirements 11.5, 20.7–20.10, 22.6) are covered by smoke/example/component tests rather than property tests, consistent with the design's testing strategy.
+- UI, library-bound (PDF/text extraction), and one-shot setup behaviors are covered by component, integration, and smoke tests rather than property tests.
+- Checkpoints ensure incremental validation at natural boundaries (pure logic, tools/PDF, the nine-stage runner, APIs, and final).
 
 ## Task Dependency Graph
 
@@ -350,16 +457,22 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   "waves": [
     { "id": 0, "tasks": ["1.1"] },
     { "id": 1, "tasks": ["2.1"] },
-    { "id": 2, "tasks": ["3.1", "3.3", "4.1", "6.1", "7.1", "7.5", "8.1"] },
-    { "id": 3, "tasks": ["3.2", "3.4", "4.2", "4.3", "6.2", "7.2", "7.3", "7.4", "7.6", "8.2", "8.3", "10.1", "10.5"] },
+    { "id": 2, "tasks": ["2.2", "3.1", "3.3", "4.1", "6.1", "7.1", "7.5", "8.1", "14.1", "14.3", "14.5", "14.8"] },
+    { "id": 3, "tasks": ["2.3", "3.2", "3.4", "4.2", "4.3", "6.2", "7.2", "7.3", "7.4", "7.6", "8.2", "8.3", "10.1", "10.5", "14.2", "14.4", "14.6", "14.7", "14.9", "14.10", "14.11", "14.12"] },
     { "id": 4, "tasks": ["7.7", "10.2", "10.3", "10.4", "10.6", "10.7", "10.8"] },
-    { "id": 5, "tasks": ["7.8", "7.9", "11.1"] },
-    { "id": 6, "tasks": ["11.2", "11.3"] },
-    { "id": 7, "tasks": ["11.4", "11.5", "11.6", "11.7"] },
-    { "id": 8, "tasks": ["11.8", "13.1", "14.1", "14.3", "14.5", "14.8", "15.1"] },
-    { "id": 9, "tasks": ["13.2", "13.3", "13.4", "14.2", "14.4", "14.6", "14.7", "14.9", "14.10", "14.11", "15.2", "15.3", "15.4", "15.5", "15.6"] },
-    { "id": 10, "tasks": ["17.1", "18.1", "19.1", "20.1", "21.1", "22.1"] },
-    { "id": 11, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2"] }
+    { "id": 5, "tasks": ["7.8", "7.9", "11.3"] },
+    { "id": 6, "tasks": ["11.1", "11.4"] },
+    { "id": 7, "tasks": ["11.2", "11.5", "13.1"] },
+    { "id": 8, "tasks": ["11.6", "11.7", "13.2", "13.3", "13.4"] },
+    { "id": 9, "tasks": ["11.8", "11.9"] },
+    { "id": 10, "tasks": ["11.10", "11.11", "11.12", "11.13"] },
+    { "id": 11, "tasks": ["11.14", "11.15"] },
+    { "id": 12, "tasks": ["11.16", "11.17", "11.18"] },
+    { "id": 13, "tasks": ["11.19", "11.20", "11.21", "11.22", "11.23"] },
+    { "id": 14, "tasks": ["11.24", "11.25", "15.1"] },
+    { "id": 15, "tasks": ["11.26", "11.27", "11.28", "11.29", "11.30", "11.31", "15.2", "15.3", "15.4", "15.5", "15.6"] },
+    { "id": 16, "tasks": ["17.1", "18.1", "19.1", "20.1", "21.1", "22.1"] },
+    { "id": 17, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2"] }
   ]
 }
 ```
