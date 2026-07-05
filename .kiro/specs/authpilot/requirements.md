@@ -33,12 +33,14 @@ This document defines the requirements for the full application: a Next.js 14 (A
 - **Resolution_Path**: One of three outcomes: Auto_Draft (high confidence), Draft_And_Request_Evidence (medium confidence), or Escalate_To_Human (low confidence or policy contradiction).
 - **Appeal_Packet**: The generated PDF appeal letter citing the denial reason, payer policy clause, and supporting chart evidence.
 - **Human_Action**: An operator decision on a recommendation: Approve, Edit, Request More Evidence, or Reject.
+- **Case_Outcome**: An Operator's terminal decision on a Case in status "AppealSent": Appeal Won (transitions the Case to "Resolved") or Appeal Denied (transitions the Case to "DeniedFinal").
 - **Case_Status**: One of New, Investigating, NeedsHumanInput, AwaitingApproval, AppealSent, Resolved, DeniedFinal.
 - **SLA_Clock**: The per-Case countdown to the CMS 2026 deadline (7 days standard, 72 hours urgent).
 - **Audit_Trail**: The complete chronological record of a Case merging extracted fields, trace steps, and human actions.
 - **Dashboard**: The Kanban home page (`/`) grouping cases by status with an analytics widget.
 - **Analytics_Page**: The `/analytics` page presenting denial-intelligence charts.
 - **Operator**: A front-office/billing staff member or physician who uses AuthPilot.
+- **Case payer reference**: The payer stored directly on a Case (Case.payerId and the convenience field Case.payerName), set during the Intake_And_Extraction stage when the payer is resolved, used as the grouping key for denials-by-payer analytics independently of any linked Patient.
 
 ## Requirements
 
@@ -54,6 +56,9 @@ This document defines the requirements for the full application: a Next.js 14 (A
 4. IF an Operator submits an Intake without selecting an intake type, THEN THE AuthPilot SHALL reject the submission and return a validation message identifying the missing intake type.
 5. WHEN a Case is created from an Intake, THE AuthPilot SHALL return the Case identifier to the Operator immediately without waiting for the agent run to complete.
 6. WHEN a Case is created from an Intake, THE AuthPilot SHALL redirect the Operator to the Case Detail page for that Case identifier.
+7. THE AuthPilot SHALL provide, on the Intake page and on the create-Case API endpoint, an urgent flag that defaults to not urgent.
+8. WHEN an Operator submits an Intake with the urgent flag set, THE AuthPilot SHALL set Case.isUrgent to true and set the SLA_Clock deadline to 72 hours from Case creation.
+9. WHEN an Operator submits an Intake with the urgent flag not set, THE AuthPilot SHALL set Case.isUrgent to false and set the SLA_Clock deadline to 7 days from Case creation.
 
 ### Requirement 2: Entity Resolution
 
@@ -65,6 +70,10 @@ This document defines the requirements for the full application: a Next.js 14 (A
 2. WHEN the Agent_Runner creates an Extracted_Field, THE Agent_Runner SHALL store the field name, extracted value, Confidence_Score, source type, reasoning, and timestamp.
 3. WHERE an entity value cannot be determined from available sources, THE Agent_Runner SHALL record the Extracted_Field with a value of "unknown" and a Confidence_Score of 0.
 4. WHEN the Agent_Runner extracts an entity value, THE Agent_Runner SHALL set the source type to one of "raw_intake", "chart_note", "payer_policy", or "code_lookup".
+5. WHEN the Intake_And_Extraction stage resolves the extracted patient to a known Patient record, THE Agent_Runner SHALL set Case.patientId to the identifier of that Patient record.
+6. IF the Intake_And_Extraction stage cannot match the extracted patient to a known Patient record, THEN THE Agent_Runner SHALL leave Case.patientId unset and record the patient as an unresolved field consistent with Requirement 20.4.
+7. WHEN the Intake_And_Extraction stage resolves the extracted payer to a known Payer, THE Agent_Runner SHALL set the Case payer reference (Case.payerId and Case.payerName) to that Payer.
+8. IF the Intake_And_Extraction stage cannot resolve the extracted payer to a known Payer, THEN THE Agent_Runner SHALL leave the Case payer reference unset and record the payer as an unresolved field consistent with Requirement 20.4.
 
 ### Requirement 3: Multi-Source Investigation via Tool Use
 
@@ -188,7 +197,7 @@ This document defines the requirements for the full application: a Next.js 14 (A
 
 #### Acceptance Criteria
 
-1. WHEN a Case is created, THE AuthPilot SHALL set the SLA_Clock deadline to 7 days from creation for a standard Case and 72 hours from creation for an urgent Case.
+1. WHEN a Case is created, THE AuthPilot SHALL set the SLA_Clock deadline to 72 hours from creation WHERE Case.isUrgent is true and to 7 days from creation WHERE Case.isUrgent is false.
 2. WHILE a Case is unresolved, THE AuthPilot SHALL display the remaining time until the SLA_Clock deadline.
 3. WHEN the remaining time until a Case SLA_Clock deadline is less than 24 hours, THE AuthPilot SHALL flag the Case as at-risk.
 4. WHEN a Case is flagged as at-risk, THE AuthPilot SHALL display the at-risk indicator on the Dashboard card and in the Analytics_Page at-risk list.
@@ -210,7 +219,7 @@ This document defines the requirements for the full application: a Next.js 14 (A
 
 #### Acceptance Criteria
 
-1. WHEN an Operator opens the Analytics_Page, THE AuthPilot SHALL display a chart of denial reasons grouped by payer.
+1. WHEN an Operator opens the Analytics_Page, THE AuthPilot SHALL display a chart of denial reasons grouped by the Case payer reference, grouping every Case whose payer reference is unset under an "Unknown payer" bucket, such that the sum of the grouped Cases equals the total number of Cases that have a denial reason.
 2. WHEN an Operator opens the Analytics_Page, THE AuthPilot SHALL display the resolution rate across Cases.
 3. WHEN an Operator opens the Analytics_Page, THE AuthPilot SHALL display the average time-to-resolution across resolved Cases.
 4. WHEN an Operator opens the Analytics_Page, THE AuthPilot SHALL display a list of Cases nearing their SLA_Clock deadline.
@@ -323,3 +332,16 @@ This document defines the requirements for the full application: a Next.js 14 (A
 4. WHEN an Operator opens the Audit Trail for a Case, THE AuthPilot SHALL return the persisted Strategy_Options and Verification_Result for that Case unchanged from the values stored by the Strategy stage and the Verification_QA stage.
 5. IF persistence of the Strategy_Options or the Verification_Result for a Case fails, THEN THE AuthPilot SHALL record a Trace_Step describing the failure and SHALL retain the existing Case recommendation without overwriting it.
 6. IF a Trace_Step is created with a step type outside the seven allowed values, THEN THE AuthPilot SHALL reject the Trace_Step and record an error indication identifying the invalid step type.
+
+### Requirement 24: Case Outcome Recording
+
+**User Story:** As an operator, I want to record whether a submitted appeal was won or denied, so that resolved cases leave the AppealSent state and analytics reflect real resolution performance.
+
+#### Acceptance Criteria
+
+1. WHILE a Case has status "AppealSent", THE AuthPilot SHALL present exactly two Case_Outcome actions, Appeal Won and Appeal Denied, to the Operator, and SHALL NOT present any Case_Outcome action while the Case has any other status.
+2. WHEN an Operator selects Appeal Won for a Case in status "AppealSent", THE AuthPilot SHALL set the Case_Status to "Resolved", set Case.resolvedAt to the system timestamp captured at the moment the action is processed, and record a Trace_Step of type "human_action" describing the recorded outcome, completing all three effects within 3 seconds of the selection.
+3. WHEN an Operator selects Appeal Denied for a Case in status "AppealSent", THE AuthPilot SHALL set the Case_Status to "DeniedFinal", set Case.resolvedAt to the system timestamp captured at the moment the action is processed, and record a Trace_Step of type "human_action" describing the recorded outcome, completing all three effects within 3 seconds of the selection.
+4. IF an Operator attempts a Case_Outcome action on a Case whose status is not "AppealSent", THEN THE AuthPilot SHALL reject the action, leave the Case_Status and Case.resolvedAt unchanged, record no Trace_Step, and return a message identifying that the Case must be in status "AppealSent" for the action to proceed.
+5. IF the AuthPilot cannot persist the Case_Status change, the Case.resolvedAt value, or the Trace_Step while processing a Case_Outcome action, THEN THE AuthPilot SHALL roll back all three effects so the Case retains status "AppealSent" with its prior Case.resolvedAt value, and return a message indicating the outcome was not recorded.
+6. WHEN a Case reaches status "Resolved" or "DeniedFinal", THE AuthPilot SHALL retain the Case.resolvedAt value for use by the resolution-rate and average-time-to-resolution analytics.
