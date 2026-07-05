@@ -2,19 +2,29 @@
 
 ## Introduction
 
-AuthPilot is a Qwen-powered autonomous agent that helps front-office/billing staff and physicians at small-to-mid-size medical practices handle insurance prior authorizations and claim denials. AuthPilot ingests a messy trigger (a denial letter, a referral/prior-auth request, or a patient phone note), resolves the entities involved (patient, payer, procedure and diagnosis codes, denial reason), investigates the patient chart and payer medical-necessity policy through tool use, detects contradictions and gaps, computes a confidence-scored decision (auto-draft, draft-and-request-evidence, or escalate to human), generates an evidence-cited appeal packet PDF, routes every outbound action through human approval, and tracks each case to resolution against CMS 2026 SLA deadlines — all with a complete, visual audit trail.
+AuthPilot is a Qwen-powered autonomous agent that helps front-office/billing staff and physicians at small-to-mid-size medical practices handle insurance prior authorizations and claim denials. AuthPilot ingests a messy trigger (a denial letter, a referral/prior-auth request, or a patient phone note), resolves the entities involved (patient, payer, procedure and diagnosis codes, denial reason), investigates the patient chart and payer medical-necessity policy through tool use, detects contradictions and gaps, computes a confidence-scored decision (auto-draft, draft-and-request-evidence, or escalate to human), generates an evidence-cited appeal packet PDF, verifies the drafted appeal for accuracy before it reaches a human, routes every outbound action through human approval, and tracks each case to resolution against CMS 2026 SLA deadlines — all with a complete, visual audit trail.
+
+AuthPilot's agent runtime is organized as an ordered multi-stage pipeline rather than a single flat loop. The stages are: (1) Intake & Extraction, (2) Medical Review and (3) Policy Review running in parallel with restricted tool scopes, (4) Strategy, (5) Decision Intelligence, (6) Appeal Generation, (7) Verification/QA, (8) Human Approval, and (9) Submission & Tracking. Each stage records its own labeled trace steps so the live trace panel can show which stage produced each reasoning line. The Strategy stage estimates win-probability across candidate approaches from seeded case history and payer-specific track record; the Verification/QA stage independently checks the generated appeal for hallucinated citations and incorrect references before human review.
 
 This document defines the requirements for the full application: a Next.js 14 (App Router) + TypeScript web app with Tailwind, shadcn/ui, Recharts, and Framer Motion on the frontend; Next.js API routes with a custom TypeScript agent loop on the backend; SQLite via Prisma for persistence; Qwen via DashScope/OpenRouter for reasoning and tool use; and pdf-lib for document generation. All external systems (EHR, payer policy, claims) are mocked with locally seeded data.
 
 ## Glossary
 
 - **AuthPilot**: The overall system, comprising the web application, API layer, agent runtime, and database.
-- **Agent_Runner**: The custom TypeScript agent loop that executes the plan → tool_call → observe → decide → act cycle by calling Qwen and the agent tools.
+- **Agent_Runner**: The custom TypeScript agent runtime that executes the ordered multi-stage pipeline by calling Qwen and the agent tools; within each stage it runs a plan → tool_call → observe → decide → act cycle.
+- **Pipeline_Stage**: One named stage of the Agent_Runner pipeline: Intake_And_Extraction, Medical_Review, Policy_Review, Strategy, Decision_Intelligence, Appeal_Generation, Verification_QA, Human_Approval, or Submission_And_Tracking.
+- **Medical_Review**: The pipeline stage that assesses clinical medical necessity using only Chart_Note data.
+- **Policy_Review**: The pipeline stage that assesses payer medical-necessity criteria using only Payer_Policy data.
+- **Strategy**: The pipeline stage that computes win-probability across candidate appeal approaches from seeded case history and payer-specific track record, and serves multi-payer policy diffing as an input.
+- **Decision_Intelligence**: The pipeline stage housing the Decision_Engine, consuming the Medical_Review, Policy_Review, and Strategy summaries.
+- **Verification_QA**: The pipeline stage that independently checks the generated Appeal_Packet for hallucinated citations, incorrect patient/policy/code references, and unsupported claims before human review.
+- **Strategy_Options**: The candidate appeal approaches with their estimated win-probabilities produced by the Strategy stage, stored on the Case.
+- **Verification_Result**: The outcome of the Verification_QA stage, comprising a pass/fail status and a list of flagged issues, stored on the Case.
 - **Qwen_Client**: The typed wrapper around the DashScope/OpenRouter chat-completions endpoint that supports function calling and retry logic.
 - **Case**: A single unit of work created from one intake, tracked from creation through resolution, holding intake text, status, extracted fields, trace steps, recommendation, and SLA deadline.
 - **Intake**: The raw trigger text/document submitted to start a Case, of type Denial Letter, New PA Request, or Patient Phone Note.
 - **Extracted_Field**: A structured fact the agent derived (e.g., patient, payer, procedure code, denial reason), stored with value, confidence, source type, reasoning, and timestamp.
-- **Trace_Step**: A single recorded agent activity (tool call, decision, or human action) with reasoning and timestamp, used to render the live agent trace and audit trail.
+- **Trace_Step**: A single recorded agent activity with reasoning and timestamp, used to render the live agent trace and audit trail. Its step type is one of "tool_call", "decision", "human_action", "medical_review", "policy_review", "strategy", or "verification".
 - **Agent_Tool**: A callable TypeScript function backed by a Prisma query or external API that the agent invokes: fetch patient record, fetch payer policy, look up diagnosis code, check prior auth history, generate appeal PDF.
 - **Payer_Policy**: A seeded LCD-style medical-necessity criteria record for a payer and procedure code.
 - **Chart_Note**: A seeded patient EHR note with a date, content, and diagnosis code, deliberately including messy or contradictory data.
@@ -69,6 +79,8 @@ This document defines the requirements for the full application: a Next.js 14 (A
 5. WHEN the Agent_Runner invokes any Agent_Tool, THE Agent_Runner SHALL record a Trace_Step of type "tool_call" storing the tool name, input, output, reasoning, and timestamp.
 6. IF an Agent_Tool invocation fails, THEN THE Agent_Runner SHALL record a Trace_Step describing the failure and continue the loop without terminating the Case.
 7. IF the diagnosis-code-lookup external service is unavailable, THEN THE diagnosis-code-lookup Agent_Tool SHALL return a result indicating the code could not be validated.
+8. WHILE the Medical_Review stage is executing, THE Agent_Runner SHALL restrict Medical_Review tool access to the fetch-patient-record Agent_Tool only.
+9. WHILE the Policy_Review stage is executing, THE Agent_Runner SHALL restrict Policy_Review tool access to the fetch-payer-policy Agent_Tool only.
 
 ### Requirement 4: Contradiction and Gap Detection
 
@@ -88,13 +100,14 @@ This document defines the requirements for the full application: a Next.js 14 (A
 #### Acceptance Criteria
 
 1. WHEN the Agent_Runner completes investigation for a Case, THE Decision_Engine SHALL compute an overall Confidence_Score from 0 to 100 for the resolution decision.
-2. WHERE the overall Confidence_Score is greater than 85 AND no contradiction is detected, THE Decision_Engine SHALL set the Resolution_Path to Auto_Draft.
-3. WHERE the overall Confidence_Score is greater than or equal to 60 AND less than or equal to 85 AND no contradiction is detected, THE Decision_Engine SHALL set the Resolution_Path to Draft_And_Request_Evidence.
-4. WHERE the overall Confidence_Score is less than 60, THE Decision_Engine SHALL set the Resolution_Path to Escalate_To_Human.
-5. WHEN the Decision_Engine sets a Resolution_Path, THE Agent_Runner SHALL record a Trace_Step of type "decision" storing the overall Confidence_Score, the selected Resolution_Path, and the reasoning.
-6. WHEN the Decision_Engine selects Auto_Draft, THE AuthPilot SHALL set the Case_Status to "AwaitingApproval".
-7. WHEN the Decision_Engine selects Draft_And_Request_Evidence, THE AuthPilot SHALL set the Case_Status to "AwaitingApproval" and record the specific additional evidence requested.
-8. WHEN the Decision_Engine selects Escalate_To_Human, THE AuthPilot SHALL set the Case_Status to "NeedsHumanInput".
+2. WHEN the Decision_Intelligence stage computes the resolution decision, THE Decision_Engine SHALL derive it from the Medical_Review summary, the Policy_Review summary, and the Strategy summary rather than from raw source documents.
+3. WHERE the overall Confidence_Score is greater than 85 AND no contradiction is detected, THE Decision_Engine SHALL set the Resolution_Path to Auto_Draft.
+4. WHERE the overall Confidence_Score is greater than or equal to 60 AND less than or equal to 85 AND no contradiction is detected, THE Decision_Engine SHALL set the Resolution_Path to Draft_And_Request_Evidence.
+5. WHERE the overall Confidence_Score is less than 60, THE Decision_Engine SHALL set the Resolution_Path to Escalate_To_Human.
+6. WHEN the Decision_Engine sets a Resolution_Path, THE Agent_Runner SHALL record a Trace_Step of type "decision" storing the overall Confidence_Score, the selected Resolution_Path, and the reasoning.
+7. WHEN the Decision_Engine selects Auto_Draft, THE AuthPilot SHALL set the Case_Status to "AwaitingApproval".
+8. WHEN the Decision_Engine selects Draft_And_Request_Evidence, THE AuthPilot SHALL set the Case_Status to "AwaitingApproval" and record the specific additional evidence requested.
+9. WHEN the Decision_Engine selects Escalate_To_Human, THE AuthPilot SHALL set the Case_Status to "NeedsHumanInput".
 
 ### Requirement 6: Agent Loop Control
 
@@ -115,9 +128,10 @@ This document defines the requirements for the full application: a Next.js 14 (A
 #### Acceptance Criteria
 
 1. WHEN the Decision_Engine selects Auto_Draft or Draft_And_Request_Evidence, THE Agent_Runner SHALL invoke the generate-appeal-PDF Agent_Tool for the Case.
-2. WHEN the generate-appeal-PDF Agent_Tool produces an Appeal_Packet, THE Appeal_Packet SHALL cite the denial reason, the referenced Payer_Policy clause, and the supporting Chart_Note evidence for the Case.
-3. WHEN an Appeal_Packet is generated, THE AuthPilot SHALL store the Appeal_Packet location reference on the Case.
-4. WHEN an Appeal_Packet is generated, THE AuthPilot SHALL make the Appeal_Packet available for preview and download on the Case Detail page.
+2. WHEN the Appeal_Generation stage produces an Appeal_Packet, THE Agent_Runner SHALL derive the Appeal_Packet content from the Decision_Intelligence stage output rather than from raw source documents.
+3. WHEN the generate-appeal-PDF Agent_Tool produces an Appeal_Packet, THE Appeal_Packet SHALL cite the denial reason, the referenced Payer_Policy clause, and the supporting Chart_Note evidence for the Case.
+4. WHEN an Appeal_Packet is generated, THE AuthPilot SHALL store the Appeal_Packet location reference on the Case.
+5. WHEN an Appeal_Packet is generated, THE AuthPilot SHALL make the Appeal_Packet available for preview and download on the Case Detail page.
 
 ### Requirement 8: Human-in-the-Loop Approval
 
@@ -166,6 +180,7 @@ This document defines the requirements for the full application: a Next.js 14 (A
 2. WHEN new Trace_Steps are retrieved for a Case, THE AuthPilot SHALL append them to the live agent trace panel in chronological order with an entrance animation.
 3. WHEN an Operator requests Trace_Steps since a given timestamp, THE AuthPilot SHALL return only the Trace_Steps created after that timestamp.
 4. WHEN a Trace_Step is displayed in the trace panel, THE AuthPilot SHALL display the step reasoning and, for tool calls, the tool name.
+5. WHEN a Trace_Step of step type "medical_review", "policy_review", "strategy", "verification", or "decision" is displayed in the trace panel, THE AuthPilot SHALL display a stage label identifying the originating Pipeline_Stage.
 
 ### Requirement 12: SLA Clock and At-Risk Flagging
 
@@ -226,6 +241,7 @@ This document defines the requirements for the full application: a Next.js 14 (A
 
 1. WHEN an Operator requests a policy comparison for a procedure code across two or more payers, THE AuthPilot SHALL retrieve the matching Payer_Policy criteria for each selected payer.
 2. WHEN Payer_Policy criteria for the same procedure differ across payers, THE AuthPilot SHALL present the differing criteria and an explanation of how the differences affect the outcome.
+3. WHEN the Strategy stage computes Strategy_Options for a Case, THE Strategy stage SHALL query the multi-payer policy diffing described in this requirement as one of its inputs.
 
 ### Requirement 18: Seed and Demo Data
 
@@ -249,3 +265,61 @@ This document defines the requirements for the full application: a Next.js 14 (A
 2. WHEN an Operator enters a patient name in the global search, THE AuthPilot SHALL display Cases matching that patient name.
 3. WHILE the Agent_Runner is executing a Case, THE AuthPilot SHALL display an agent-status indicator showing the running Case identifier.
 4. WHILE no Agent_Runner execution is in progress, THE AuthPilot SHALL display an agent-status indicator showing "Idle".
+
+### Requirement 20: Multi-Stage Agent Pipeline
+
+**User Story:** As an operator, I want AuthPilot to run as distinct named stages, so that I can see specialized reasoning steps instead of one undifferentiated loop.
+
+#### Acceptance Criteria
+
+1. WHEN the Agent_Runner processes a Case, THE Agent_Runner SHALL execute the pipeline so that the earliest Trace_Step timestamp of each Pipeline_Stage occurs in the relative order Intake_And_Extraction first, then Medical_Review and Policy_Review, then Strategy, then Decision_Intelligence, then Appeal_Generation, then Verification_QA, then Human_Approval, then Submission_And_Tracking.
+2. WHEN the Agent_Runner reaches the review phase for a Case, THE Agent_Runner SHALL run the Medical_Review stage and the Policy_Review stage with overlapping execution windows, such that each of the two stages begins before the other stage completes.
+3. WHEN the Intake_And_Extraction stage runs, THE Agent_Runner SHALL resolve, within that single stage, an Extracted_Field for each of patient, payer, procedure code, diagnosis code, and denial reason.
+4. IF the Intake_And_Extraction stage cannot resolve one or more of the required Extracted_Fields (patient, payer, procedure code, diagnosis code, or denial reason) from the Intake, THEN THE Agent_Runner SHALL record a Trace_Step identifying each unresolved field and continue the pipeline without terminating the Case.
+5. WHEN any Pipeline_Stage runs, THE Agent_Runner SHALL record at least one Trace_Step labeled with that Pipeline_Stage.
+6. IF a Pipeline_Stage fails to complete due to an error, THEN THE Agent_Runner SHALL record a Trace_Step describing the failure and the affected Pipeline_Stage, and set the Resolution_Path to Escalate_To_Human without proceeding to subsequent stages.
+7. WHEN the Medical_Review stage records a Trace_Step, THE Agent_Runner SHALL set the Trace_Step step type to "medical_review".
+8. WHEN the Policy_Review stage records a Trace_Step, THE Agent_Runner SHALL set the Trace_Step step type to "policy_review".
+9. WHEN the Strategy stage records a Trace_Step, THE Agent_Runner SHALL set the Trace_Step step type to "strategy".
+10. WHEN the Verification_QA stage records a Trace_Step, THE Agent_Runner SHALL set the Trace_Step step type to "verification".
+11. THE Agent_Runner SHALL implement the Strategy and Verification_QA stages using only the existing Agent_Tools without introducing any additional tool.
+12. THE Agent_Runner SHALL implement the pipeline without a separate Learning, Memory, Document, Entity, or Orchestrator stage as a distinct Qwen call.
+
+### Requirement 21: Strategy Stage
+
+**User Story:** As a practice manager, I want AuthPilot to weigh candidate appeal approaches by likelihood of success, so that it pursues the strategy most likely to win.
+
+#### Acceptance Criteria
+
+1. WHEN the Strategy stage runs for a Case, THE Strategy stage SHALL invoke the prior-auth-history Agent_Tool with the patient identifier to obtain the seeded case history for the patient.
+2. WHEN the Strategy stage runs for a Case, THE Strategy stage SHALL identify at least one and at most five candidate appeal approaches and compute for each a win-probability estimate, expressed as an integer from 0 to 100 (percent), using the seeded case history and the payer-specific track record.
+3. IF the prior-auth-history Agent_Tool returns no seeded case history or fails to return within its invocation, THEN THE Strategy stage SHALL compute the win-probability estimates using the payer-specific track record only and SHALL record an indication that seeded case history was unavailable.
+4. WHEN the Strategy stage computes candidate approaches, THE AuthPilot SHALL store each candidate appeal approach and its win-probability estimate as Strategy_Options on the Case, ordered by descending win-probability estimate.
+5. WHEN the Strategy stage completes, THE Agent_Runner SHALL provide the Strategy_Options summary, including each candidate appeal approach and its win-probability estimate, to the Decision_Intelligence stage.
+
+### Requirement 22: Verification and QA Stage
+
+**User Story:** As a physician, I want AuthPilot to independently check the drafted appeal for errors before I see it, so that I never review an appeal containing fabricated or mismatched references.
+
+#### Acceptance Criteria
+
+1. WHEN an Appeal_Packet is generated for a Case, THE Verification_QA stage SHALL check every citation in the Appeal_Packet against the retrieved Payer_Policy and Chart_Note data, and SHALL add a flagged issue identifying each citation that is not supported by that data.
+2. WHEN an Appeal_Packet is generated for a Case, THE Verification_QA stage SHALL check every patient, policy, and code reference in the Appeal_Packet against the Case Extracted_Field values, and SHALL add a flagged issue identifying each reference that does not match the corresponding Extracted_Field value.
+3. WHEN an Appeal_Packet is generated for a Case, THE Verification_QA stage SHALL check every claim in the Appeal_Packet against the retrieved evidence, and SHALL add a flagged issue identifying each claim that is not supported by that evidence.
+4. WHEN the Verification_QA stage completes its checks, THE AuthPilot SHALL store a Verification_Result on the Case whose status is pass when the flagged-issues list contains zero issues and fail when the flagged-issues list contains one or more issues, together with the complete flagged-issues list.
+5. THE AuthPilot SHALL NOT present a Case for Human_Approval until the Verification_QA stage has completed and its Verification_Result has been stored on the Case.
+6. IF the Verification_Result status is fail, THEN THE AuthPilot SHALL display each flagged issue alongside the recommendation in the human action zone.
+7. IF the Verification_QA stage cannot complete its checks due to a processing error, THEN THE AuthPilot SHALL store a Verification_Result with status fail and a flagged issue indicating that verification could not be completed, and SHALL NOT present the Case for Human_Approval as verified.
+
+### Requirement 23: Pipeline Data Persistence
+
+**User Story:** As a compliance-conscious operator, I want the strategy and verification outputs stored on the case, so that the full multi-stage reasoning is auditable.
+
+#### Acceptance Criteria
+
+1. WHEN the Strategy stage produces Strategy_Options for a Case, THE AuthPilot SHALL persist the Strategy_Options on that Case as a structured field that retains each candidate appeal approach with its win-probability estimate and is retrievable independently of the existing recommendation.
+2. WHEN the Verification_QA stage produces a Verification_Result for a Case, THE AuthPilot SHALL persist the Verification_Result on that Case as a structured field that retains the pass or fail status and the complete list of flagged issues and is retrievable independently of the existing recommendation.
+3. THE AuthPilot SHALL restrict a Trace_Step step type to exactly one of the following seven values: "tool_call", "decision", "human_action", "medical_review", "policy_review", "strategy", or "verification".
+4. WHEN an Operator opens the Audit Trail for a Case, THE AuthPilot SHALL return the persisted Strategy_Options and Verification_Result for that Case unchanged from the values stored by the Strategy stage and the Verification_QA stage.
+5. IF persistence of the Strategy_Options or the Verification_Result for a Case fails, THEN THE AuthPilot SHALL record a Trace_Step describing the failure and SHALL retain the existing Case recommendation without overwriting it.
+6. IF a Trace_Step is created with a step type outside the seven allowed values, THEN THE AuthPilot SHALL reject the Trace_Step and record an error indication identifying the invalid step type.
