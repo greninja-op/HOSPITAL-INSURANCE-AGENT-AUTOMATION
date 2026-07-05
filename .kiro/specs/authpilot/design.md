@@ -253,7 +253,7 @@ async function runStage<S>(caseId: string, stage: PipelineStage, ...): Promise<S
 
 Responsibilities, in stage order:
 
-1. **Intake_And_Extraction.** Set status `Investigating`; in a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as `Extracted_Field`s (Requirement 20.3). For any of the five that cannot be resolved, record a `Trace_Step` naming each unresolved field and continue the pipeline (Requirement 20.4). This stage merges the former Document + Entity steps into one call (Requirements 20.12).
+1. **Intake_And_Extraction.** Set status `Investigating`; in a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as `Extracted_Field`s (Requirement 20.3). When the extracted patient matches a known `Patient` record, set `Case.patientId` to that record's id; when it does not match, leave `Case.patientId` unset (Requirements 2.5, 2.6). When the extracted payer resolves to a known `Payer`, set the Case payer reference — `Case.payerId` and the convenience field `Case.payerName` — to that Payer; when it does not resolve, leave both unset (Requirements 2.7, 2.8). For any of the five fields that cannot be resolved — including an unmatched patient or unresolved payer — record a `Trace_Step` naming each unresolved field and continue the pipeline (Requirement 20.4). This stage merges the former Document + Entity steps into one call (Requirements 20.12). `Case.patientId` is the linkage that dashboard patient initials, global patient search, and prior-auth history depend on; the Case payer reference is the grouping key for denials-by-payer analytics (independent of any linked Patient).
 2. **Medical_Review** and **3. Policy_Review — run concurrently** via `Promise.all([runStage(..., "Medical_Review"), runStage(..., "Policy_Review")])`. Medical_Review is scoped to `fetchPatientRecord` and writes `stepType: "medical_review"`; Policy_Review is scoped to `fetchPayerPolicy` and writes `stepType: "policy_review"`. Because they are awaited together, each begins before the other completes (Requirement 20.2). Each produces a summary consumed downstream.
 4. **Strategy.** Invoke `checkPriorAuthHistory(patientId)` for seeded case history and query multi-payer policy diffing as an input (Requirement 17.3); compute 1–5 candidate appeal approaches, each with an integer win-probability (0–100), using the history and payer-specific track record. If history is empty or the tool fails, fall back to payer track record only and record that history was unavailable (Requirement 21.3). Store the approaches as `strategyOptions`, ordered by descending win-probability (Requirements 21.4, 23.1); write `stepType: "strategy"`.
 5. **Decision_Intelligence.** Call the pure `Decision_Engine` over the Medical_Review, Policy_Review, and Strategy summaries (not raw documents, Requirement 5.2); persist the `decision` `Trace_Step`. On loop exhaustion without a decision, force `Escalate_To_Human` with a "needs manual review" trace step.
@@ -352,33 +352,35 @@ function isAtRisk(deadline: Date, now: Date): boolean;          // remaining < 2
 
 | Route | Method | Purpose | Requirements |
 |---|---|---|---|
-| `/api/cases` | POST | Validate intake, create Case (status New), kick off `runAgent` async, return caseId | 1.1–1.6 |
+| `/api/cases` | POST | Validate intake (incl. optional `urgent` flag), create Case (status New) with `isUrgent` and `slaDeadline` computed via `slaDeadline(createdAt, urgent)`, kick off `runAgent` async, return caseId | 1.1–1.9, 12.1 |
 | `/api/cases` | GET | List all cases for the Dashboard | 10.1 |
 | `/api/cases/[id]` | GET | Full case detail: fields, trace steps, recommendation, appeal | 13.1–13.4 |
 | `/api/cases/[id]/trace` | GET | Trace steps created after a `since` timestamp | 11.1–11.3 |
-| `/api/cases/[id]/action` | POST | Human action: approve / edit / request-more-evidence / reject | 8.1–8.7, 16 |
+| `/api/cases/[id]/action` | POST | Human action: approve / edit / request-more-evidence / reject; and Case_Outcome recording (appeal-won / appeal-denied) for AppealSent cases | 8.1–8.7, 16, 24 |
 | `/api/cases/[id]/audit/export` | GET | Generate audit-trail PDF | 9.4 |
-| `/api/analytics` | GET | Aggregations for the Analytics page | 14.1–14.4 |
+| `/api/analytics` | GET | Aggregations for the Analytics page (denials grouped by the Case payer reference with an "Unknown payer" bucket) | 14.1–14.4 |
 | `/api/policies/compare` | GET | Policy diffing across payers for a procedure code | 17.1–17.2 |
 | `/api/patients/search` | GET | Global search by patient name | 19.2 |
 | `/api/demo/reset` | POST | Re-run seed | 18.5 |
 
-Intake validation (zod): rejects empty text with no file (1.3) and missing intake type (1.4) with a field-identifying message.
+Intake validation (zod): rejects empty text with no file (1.3) and missing intake type (1.4) with a field-identifying message. The schema also accepts an optional `urgent` boolean that defaults to `false` when omitted (Requirement 1.7); the POST `/api/cases` handler sets `Case.isUrgent` from it and computes `slaDeadline` as `slaDeadline(createdAt, urgent)` — createdAt + 72h when urgent, createdAt + 7d otherwise (Requirements 1.8, 1.9, 12.1).
+
+The `/api/cases/[id]/action` route accepts, in addition to the four Human_Action types, two Case_Outcome action types — `appeal_won` and `appeal_denied` — for Cases in status `AppealSent` (Requirement 24). These are handled by extending the existing action route rather than adding a dedicated route, keeping all Case-mutating operator actions behind one validated handler. See Error Handling → Human-in-the-loop for the outcome transition, guard, and rollback rules.
 
 ### Frontend Components and Pages
 
 - **Layout** (`app/layout.tsx`): persistent sidebar (Dashboard / New Case / Analytics), global patient search, top-bar `AgentStatusIndicator` (Idle / Running Case #id). (Req 19)
 - **Dashboard** (`app/page.tsx`): `KanbanBoard` with a column per `Case_Status`; `CaseCard` shows patient initials, payer, procedure, confidence badge, and `SlaCountdownRing`; top `DenialsByPayerWidget` (Recharts). (Req 10, 12)
-- **Intake** (`app/intake/page.tsx`): `IntakeForm` (textarea + file upload + intake-type select) → POST `/api/cases` → redirect to Case Detail. (Req 1)
-- **Case Detail** (`app/case/[id]/page.tsx`): three panels — `CaseFactsPanel` (extracted fields with confidence chips and expandable source tags), `LiveTracePanel` (dark terminal feed, polls `/trace` every 1s while Investigating, Framer Motion entrance), `HumanActionZone` (recommendation card + Approve/Edit/Request More Evidence/Reject + appeal PDF preview/download + plain-English explanation). The `LiveTracePanel` labels each trace line with a **stage icon/label** derived from its `stepType` — 🩺 Medical (`medical_review`), 📚 Policy (`policy_review`), 🎯 Strategy (`strategy`), ✅ Verification (`verification`), 🤖 Decision (`decision`), plus the tool name for `tool_call` steps — so the multi-stage pipeline is visible (Requirements 11.4, 11.5). When the stored `verificationResult.status` is `fail`, `HumanActionZone` displays each flagged issue alongside the recommendation (Requirement 22.6). (Req 11, 13, 15, 7, 22)
+- **Intake** (`app/intake/page.tsx`): `IntakeForm` (textarea + file upload + intake-type select + an **urgent** toggle that defaults to off) → POST `/api/cases` → redirect to Case Detail. The urgent toggle drives `Case.isUrgent` and the SLA deadline (72h urgent / 7d standard). (Req 1)
+- **Case Detail** (`app/case/[id]/page.tsx`): three panels — `CaseFactsPanel` (extracted fields with confidence chips and expandable source tags), `LiveTracePanel` (dark terminal feed, polls `/trace` every 1s while Investigating, Framer Motion entrance), `HumanActionZone` (recommendation card + Approve/Edit/Request More Evidence/Reject + appeal PDF preview/download + plain-English explanation). The `LiveTracePanel` labels each trace line with a **stage icon/label** derived from its `stepType` — 🩺 Medical (`medical_review`), 📚 Policy (`policy_review`), 🎯 Strategy (`strategy`), ✅ Verification (`verification`), 🤖 Decision (`decision`), plus the tool name for `tool_call` steps — so the multi-stage pipeline is visible (Requirements 11.4, 11.5). When the stored `verificationResult.status` is `fail`, `HumanActionZone` displays each flagged issue alongside the recommendation (Requirement 22.6). When the Case status is `AppealSent`, `HumanActionZone` instead shows the two Case_Outcome controls — **Appeal Won** and **Appeal Denied** — which POST to `/action` to record the terminal outcome; these controls are shown only for `AppealSent` cases and hidden in every other status (Requirement 24.1). (Req 11, 13, 15, 7, 22, 24)
 - **Audit** (`app/case/[id]/audit/page.tsx`): merged chronological timeline of fields + trace steps; "Download as PDF". (Req 9)
-- **Analytics** (`app/analytics/page.tsx`): denials-by-payer bar chart, resolution-rate, average time-to-resolution, at-risk list. (Req 14)
+- **Analytics** (`app/analytics/page.tsx`): denials-by-payer bar chart (grouped by the Case payer reference, with unset payers in an "Unknown payer" bucket so grouped totals equal the number of cases with a denial reason), resolution-rate, average time-to-resolution, at-risk list. (Req 14)
 
 Component styling follows the clinical palette and typography (Inter UI, JetBrains Mono for codes/trace) defined in the brief.
 
 ## Data Models
 
-Prisma schema (SQLite). The brief's schema is extended with fields required by the acceptance criteria: `Case.isUrgent`, `Case.resolutionPath`, `Case.plainEnglishExplanation`, `Case.requestedEvidence`, `Case.resolvedAt`, a `denialReason` convenience column for analytics grouping, and the multi-stage pipeline fields `Case.strategyOptions` and `Case.verificationResult` (Requirements 23.1, 23.2). `TraceStep.stepType` is extended with the four stage labels.
+Prisma schema (SQLite). The brief's schema is extended with fields required by the acceptance criteria: `Case.isUrgent`, `Case.resolutionPath`, `Case.plainEnglishExplanation`, `Case.requestedEvidence`, `Case.resolvedAt`, a `denialReason` convenience column for analytics grouping, the Case payer reference (`Case.payerId` relation to `Payer` plus the `Case.payerName` convenience field) used as the denials-by-payer grouping key (Requirements 2.7, 2.8, 14.1), and the multi-stage pipeline fields `Case.strategyOptions` and `Case.verificationResult` (Requirements 23.1, 23.2). `TraceStep.stepType` is extended with the four stage labels.
 
 ```prisma
 model Patient {
@@ -405,6 +407,7 @@ model Payer {
   name     String
   policies PayerPolicy[]
   patients Patient[]
+  cases    Case[]
 }
 
 model PayerPolicy {
@@ -420,6 +423,9 @@ model Case {
   id                      String           @id @default(cuid())
   patientId               String?
   patient                 Patient?         @relation(fields: [patientId], references: [id])
+  payerId                 String?          // Case payer reference — set during Intake_And_Extraction when the payer resolves (Req 2.7, 2.8)
+  payer                   Payer?           @relation(fields: [payerId], references: [id])
+  payerName               String?          // convenience copy of the resolved payer name for analytics grouping (Req 14.1)
   intakeType              String           // "denial_letter" | "new_pa_request" | "phone_note"
   rawIntakeText           String
   status                  String           // New | Investigating | NeedsHumanInput | AwaitingApproval | AppealSent | Resolved | DeniedFinal
@@ -469,6 +475,7 @@ model TraceStep {
 
 - `Case_Status`: `New`, `Investigating`, `NeedsHumanInput`, `AwaitingApproval`, `AppealSent`, `Resolved`, `DeniedFinal`.
 - `Resolution_Path`: `Auto_Draft`, `Draft_And_Request_Evidence`, `Escalate_To_Human`.
+- `Case_Outcome`: `Appeal Won` (transitions `AppealSent` → `Resolved`) and `Appeal Denied` (transitions `AppealSent` → `DeniedFinal`); surfaced on the `/action` route as action types `appeal_won` and `appeal_denied` (Requirement 24).
 - `Pipeline_Stage`: `Intake_And_Extraction`, `Medical_Review`, `Policy_Review`, `Strategy`, `Decision_Intelligence`, `Appeal_Generation`, `Verification_QA`, `Human_Approval`, `Submission_And_Tracking`.
 - `intakeType`: `denial_letter`, `new_pa_request`, `phone_note`.
 - `sourceType`: `raw_intake`, `chart_note`, `payer_policy`, `code_lookup`.
@@ -706,9 +713,9 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 ### Property 30: SLA deadline computation
 
-*For any* Case creation time, the SLA_Clock deadline equals the creation time plus 7 days for a standard Case and plus 72 hours for an urgent Case, and the remaining time equals the deadline minus the current time.
+*For any* Case creation time and urgent flag, the SLA_Clock deadline is driven by `Case.isUrgent`: it equals the creation time plus 72 hours when `isUrgent` is true and plus 7 days when `isUrgent` is false, and the remaining time equals the deadline minus the current time. Equivalently, `slaDeadline(createdAt, urgent)` returns `createdAt + 72h` for urgent and `createdAt + 7d` for standard, and a Case created without the urgent flag has `isUrgent` false and the 7-day deadline.
 
-**Validates: Requirements 12.1, 12.2**
+**Validates: Requirements 1.8, 1.9, 12.1, 12.2**
 
 ### Property 31: At-risk boundary
 
@@ -718,7 +725,7 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 ### Property 32: Denials-by-payer aggregation is exact
 
-*For any* set of Cases, the denials-by-payer aggregation reports, for each payer, a count equal to the true number of Cases for that payer, and the sum of all reported counts equals the total number of Cases with a denial reason.
+*For any* set of Cases, the denials-by-payer aggregation groups Cases by the Case payer reference (`Case.payerId`/`Case.payerName`), reporting for each payer a count equal to the true number of Cases whose payer reference is that payer, and placing every Case whose payer reference is unset into a single "Unknown payer" bucket; the sum of all reported counts (including the "Unknown payer" bucket) equals the total number of Cases with a denial reason.
 
 **Validates: Requirements 14.1**
 
@@ -842,6 +849,30 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 **Validates: Requirements 23.5**
 
+### Property 53: Patient and payer linkage set on resolve, unset otherwise
+
+*For any* Intake_And_Extraction result, the Case's `patientId` is set to a matched `Patient`'s id when the extracted patient matches a known Patient and is left unset otherwise; the Case payer reference (`payerId` and `payerName`) is set to a resolved `Payer` when the extracted payer resolves to a known Payer and is left unset otherwise; and in each unresolved case a `Trace_Step` identifying that field (patient or payer) as unresolved is recorded.
+
+**Validates: Requirements 2.5, 2.6, 2.7, 2.8**
+
+### Property 54: Case outcome transitions from AppealSent
+
+*For any* Case in status `AppealSent`, recording an `appeal_won` outcome sets the status to `Resolved` and recording an `appeal_denied` outcome sets the status to `DeniedFinal`; in both cases `Case.resolvedAt` is set to the processing timestamp and exactly one new `human_action` Trace_Step describing the outcome is recorded.
+
+**Validates: Requirements 24.2, 24.3**
+
+### Property 55: Outcome actions rejected outside AppealSent
+
+*For any* Case whose status is not `AppealSent`, attempting either Case_Outcome action (`appeal_won` or `appeal_denied`) is rejected, leaving the `Case_Status` and `Case.resolvedAt` unchanged, adding no Trace_Step, and returning a message identifying that the Case must be in status `AppealSent`.
+
+**Validates: Requirements 24.1, 24.4**
+
+### Property 56: Outcome persistence failure rolls back atomically
+
+*For any* Case_Outcome action on an `AppealSent` Case in which persisting the status change, the `resolvedAt` value, or the Trace_Step fails, all three effects are rolled back so the Case retains status `AppealSent` with its prior `Case.resolvedAt` and no partial Trace_Step, and a message indicating the outcome was not recorded is returned.
+
+**Validates: Requirements 24.5**
+
 ## Error Handling
 
 ### Intake and API validation
@@ -887,6 +918,9 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 ### Human-in-the-loop safety
 
 - No outbound action is ever transmitted to an external system; approved sends are simulated (Requirement 8.7). The status transition to `AppealSent` requires a recorded Approve Human_Action (Requirements 8.2, 8.6), enforced in the action handler.
+- **Case_Outcome recording (Requirement 24).** The `/action` handler accepts two outcome action types for a Case in status `AppealSent`: `appeal_won` transitions the Case to `Resolved`, and `appeal_denied` transitions it to `DeniedFinal`. Each outcome sets `Case.resolvedAt` to the timestamp captured when the action is processed and records a `human_action` `Trace_Step` describing the recorded outcome (Requirements 24.2, 24.3). The retained `resolvedAt` feeds the resolution-rate and average-time-to-resolution analytics (Requirement 24.6).
+- **Outcome guard.** If an outcome action is attempted on a Case whose status is not `AppealSent`, the handler rejects it, leaves `Case_Status` and `Case.resolvedAt` unchanged, records no `Trace_Step`, and returns a message stating the Case must be in status `AppealSent` for the action to proceed (Requirement 24.1, 24.4).
+- **Outcome atomicity.** The status change, the `resolvedAt` update, and the `human_action` `Trace_Step` are written in a single transaction. If any of the three cannot be persisted, all three are rolled back so the Case retains status `AppealSent` with its prior `Case.resolvedAt`, and the handler returns a message indicating the outcome was not recorded (Requirement 24.5).
 
 ### Persistence and concurrency
 
@@ -901,8 +935,8 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 ### Dual approach
 
-- **Property-based tests** verify the 52 universal properties above across many generated inputs. They target the pure and near-pure logic: the Decision_Engine, SLA computations, entity/field invariants, contradiction/stale/gap detection, trace filtering and merging, aggregation, search, and the runner's decision/PDF/human-action side-effect rules (with Qwen and Prisma mocked/in-memory where needed). The multi-stage additions are covered too: stage ordering (36), parallel review overlap (37), unresolved-field tracing (38), per-stage labeling (39, 41), stage-failure escalation (40), stage-scoped tool access (42), strategy win-probability range/ordering/fallback (43–45), verification detection/definition/gating/error handling (46–49), and pipeline-data persistence/restriction (50–52).
-- **Example-based unit tests** cover specific behaviors and edge cases: intake redirect, async immediate-return, UI rendering of panels/cards/badges, source-tag expansion, polling cadence, the diagnosis-code-unavailable edge case (Requirement 3.7), the `LiveTracePanel` stage icon/label rendering for each stepType (Requirements 11.5, 20.7–20.10), the `HumanActionZone` flagged-issue display on verification fail (Requirement 22.6), that Intake_And_Extraction resolves the five fields in one stage (Requirement 20.3), and that the Strategy stage invokes `checkPriorAuthHistory` and consumes the policy diff (Requirements 21.1, 17.3).
+- **Property-based tests** verify the 56 universal properties above across many generated inputs. They target the pure and near-pure logic: the Decision_Engine, SLA computations, entity/field invariants, contradiction/stale/gap detection, trace filtering and merging, aggregation, search, and the runner's decision/PDF/human-action side-effect rules (with Qwen and Prisma mocked/in-memory where needed). The multi-stage additions are covered too: stage ordering (36), parallel review overlap (37), unresolved-field tracing (38), per-stage labeling (39, 41), stage-failure escalation (40), stage-scoped tool access (42), strategy win-probability range/ordering/fallback (43–45), verification detection/definition/gating/error handling (46–49), and pipeline-data persistence/restriction (50–52). The gap-closure additions are covered by the urgent-driven SLA deadline (30) and denials-by-payer bucketing (32), patient/payer linkage (53), and case-outcome transitions, rejection guard, and rollback atomicity (54–56).
+- **Example-based unit tests** cover specific behaviors and edge cases: intake redirect, async immediate-return, the urgent-flag toggle defaulting to off on the intake form (Requirement 1.7), UI rendering of panels/cards/badges, source-tag expansion, polling cadence, the diagnosis-code-unavailable edge case (Requirement 3.7), the `LiveTracePanel` stage icon/label rendering for each stepType (Requirements 11.5, 20.7–20.10), the `HumanActionZone` flagged-issue display on verification fail (Requirement 22.6), the `HumanActionZone` Appeal Won / Appeal Denied controls appearing only for `AppealSent` cases (Requirement 24.1), the retention of `resolvedAt` feeding resolution-rate and average-time-to-resolution analytics (Requirement 24.6), that Intake_And_Extraction resolves the five fields in one stage (Requirement 20.3), and that the Strategy stage invokes `checkPriorAuthHistory` and consumes the policy diff (Requirements 21.1, 17.3).
 - **Integration tests** cover I/O and library-bound behavior with 1–3 examples: PDF text extraction on intake (1.2), appeal and audit PDF generation (7.4, 9.4), and the NIH lookup happy path (3.3).
 - **Smoke/architectural tests** cover one-shot setup and wiring guarantees: seed content assertions and demo reset (Requirements 18.1–18.5); that the tool registry contains only the five existing tools (Requirement 20.11); that the pipeline defines exactly the nine named stages with no separate Learning/Memory/Document/Entity/Orchestrator Qwen call (Requirement 20.12); and that Decision_Intelligence and Appeal_Generation receive summary/decision objects rather than raw documents (Requirements 5.2, 7.2).
 
@@ -915,7 +949,7 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 - Each property test runs a **minimum of 100 iterations** (`{ numRuns: 100 }` or higher).
 - Each property test is tagged with a comment referencing its design property in the format:
   `// Feature: authpilot, Property {number}: {property_text}`
-- Each of the 52 correctness properties is implemented by a **single** property-based test.
+- Each of the 56 correctness properties is implemented by a **single** property-based test.
 - External dependencies (Qwen, NIH API) are replaced with deterministic fakes; the database uses an in-memory/temporary SQLite instance so property tests stay fast and cheap enough for 100+ iterations.
 
 ### Generators
@@ -923,9 +957,11 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 - **Intake generator**: random text (including all-whitespace and empty), intake types (valid and invalid), optional file flag.
 - **Decision input generator**: confidence across [0, 100] with emphasis on the 60 and 85 boundaries, contradiction counts including 0, and both iteration-exhausted states.
 - **Chart-note date generator**: dates clustered around the 90-day boundary relative to a generated case-creation date.
-- **SLA generator**: creation times, urgency flags, and "now" values clustered around the deadline and the 24-hour at-risk boundary.
+- **SLA generator**: creation times, urgency flags (including omitted, exercising the `isUrgent`-false default), and "now" values clustered around the deadline and the 24-hour at-risk boundary, for the `isUrgent`-driven deadline property (30).
 - **Records generator**: mixed Extracted_Field and Trace_Step lists with arbitrary timestamps (including ties) for merge/filter/aggregation properties.
-- **Case-set generator**: cases across all statuses, payers, and patient names for grouping, aggregation, and search properties.
+- **Case-set generator**: cases across all statuses, payer references (including some with an unset payer reference), and patient names for grouping, aggregation (including the "Unknown payer" bucket, Property 32), and search properties.
+- **Linkage generator**: Intake_And_Extraction results whose extracted patient and payer either match or do not match a seeded `Patient`/`Payer`, for the patient/payer linkage property (53) — asserting `patientId`/`payerId`/`payerName` set on resolve and unset-plus-unresolved-trace otherwise.
+- **Case-outcome generator**: Cases across all statuses paired with a Case_Outcome action (`appeal_won` / `appeal_denied`) and an injectable persistence-failure flag, for the outcome-transition (54), rejection-guard (55), and rollback-atomicity (56) properties.
 - **Pipeline generator**: runs over generated cases with instrumented per-stage start/end timestamps and injectable stage failures, for stage-ordering, parallel-overlap, per-stage-labeling, and stage-failure properties (36–41).
 - **Strategy generator**: prior-auth histories (including empty) and payer track records, for win-probability count/range, ordering, and fallback properties (43–45).
 - **Appeal/verification generator**: appeal packets with a mix of supported and injected-unsupported citations, matched and mismatched references (vs generated Extracted_Fields), and supported/unsupported claims, plus a verification-error flag, for the verification detection/definition/error properties (46, 47, 49).
