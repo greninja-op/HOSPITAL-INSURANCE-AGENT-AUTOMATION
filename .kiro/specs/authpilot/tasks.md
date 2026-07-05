@@ -15,10 +15,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [ ] 2. Define the data layer with Prisma
   - [ ] 2.1 Author the Prisma schema and generate the client
     - Define `Patient`, `ChartNote`, `Payer`, `PayerPolicy`, `Case`, `ExtractedField`, `TraceStep` models per the design, including `Case.isUrgent`, `resolutionPath`, `denialReason`, `requestedEvidence`, `plainEnglishExplanation`, `recommendation`, `appealPdfUrl`, `resolvedAt`, and the multi-stage pipeline fields `Case.strategyOptions` (Json?) and `Case.verificationResult` (Json?)
+    - Add the Case payer reference to the schema: `Case.payerId` (String?, optional relation to `Payer`) and the `Case.payerName` (String?) convenience field used as the denials-by-payer analytics grouping key, plus the corresponding `Payer.cases Case[]` reverse relation
     - Extend `TraceStep.stepType` to allow the seven values `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`
     - Configure SQLite datasource and add a shared Prisma client module in `lib/db.ts`
     - Add a test helper that spins up an in-memory/temporary SQLite instance for tests
-    - _Requirements: 2.2, 9.1, 23.1, 23.2, 23.3_
+    - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3_
 
   - [ ] 2.2 Implement the stepType validation guard
     - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
@@ -55,7 +56,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 
   - [ ]* 4.2 Write property test for SLA deadline computation
     - **Property 30: SLA deadline computation**
-    - **Validates: Requirements 12.1, 12.2**
+    - Cover the `isUrgent`-driven deadline: `slaDeadline(createdAt, urgent)` returns `createdAt + 72h` when urgent and `createdAt + 7d` when standard, and a Case created without the urgent flag has `isUrgent` false with the 7-day deadline
+    - **Validates: Requirements 1.8, 1.9, 12.1, 12.2**
 
   - [ ]* 4.3 Write property test for the at-risk boundary
     - **Property 31: At-risk boundary**
@@ -181,7 +183,9 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 
   - [ ] 11.5 Implement the Intake_And_Extraction stage
     - In a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as Extracted_Fields (merging the former document + entity steps into one call); for any of the five that cannot be resolved, record a Trace_Step naming each unresolved field and continue the pipeline without terminating the Case
-    - _Requirements: 20.3, 20.4, 20.12_
+    - When the extracted patient matches a known `Patient` record, set `Case.patientId` to that record's id; when it does not match, leave `Case.patientId` unset and record the patient as an unresolved field
+    - When the extracted payer resolves to a known `Payer`, set the Case payer reference (`Case.payerId` and `Case.payerName`) to that Payer; when it does not resolve, leave both unset and record the payer as an unresolved field
+    - _Requirements: 2.5, 2.6, 2.7, 2.8, 20.3, 20.4, 20.12_
 
   - [ ]* 11.6 Write property test for unresolved intake fields traced without terminating
     - **Property 38: Unresolved intake fields are traced without terminating**
@@ -287,13 +291,18 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert the tool registry contains only the five existing tools (20.11); the pipeline defines exactly the nine named stages with no separate Learning/Memory/Document/Entity/Orchestrator Qwen call (20.12); Decision_Intelligence and Appeal_Generation receive summary/decision objects rather than raw documents (5.2, 7.2); Intake_And_Extraction resolves the five fields in one stage (20.3); and the Strategy stage invokes `checkPriorAuthHistory` and consumes the multi-payer policy diff (21.1, 17.3)
     - _Requirements: 5.2, 7.2, 17.3, 20.3, 20.11, 20.12, 21.1_
 
+  - [ ]* 11.32 Write property test for patient and payer linkage
+    - **Property 53: Patient and payer linkage set on resolve, unset otherwise**
+    - Assert `Case.patientId` is set to a matched Patient's id when the patient matches and left unset otherwise; the Case payer reference (`payerId`/`payerName`) is set to a resolved Payer and left unset otherwise; and in each unresolved case a Trace_Step identifying that field as unresolved is recorded
+    - **Validates: Requirements 2.5, 2.6, 2.7, 2.8**
+
 - [ ] 12. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 13. Implement intake and case creation API
   - [ ] 13.1 Implement `POST /api/cases` with zod validation and async kickoff
-    - Validate intake (reject empty/whitespace text with no file and missing/invalid intake type with a field-identifying 400); on PDF upload extract text via pdf-lib and store as raw intake; create Case status New with SLA deadline; kick off `runAgent` async and return the caseId immediately
-    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 12.1_
+    - Validate intake (reject empty/whitespace text with no file and missing/invalid intake type with a field-identifying 400); accept an optional `urgent` boolean that defaults to `false` when omitted; on PDF upload extract text via pdf-lib and store as raw intake; create Case status New, setting `Case.isUrgent` from the `urgent` flag and computing `slaDeadline` via `slaDeadline(createdAt, urgent)`; kick off `runAgent` async and return the caseId immediately
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.7, 1.8, 1.9, 12.1_
 
   - [ ]* 13.2 Write property test for case creation preserving intake
     - **Property 1: Case creation preserves intake**
@@ -337,11 +346,12 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - _Requirements: 9.4_
 
   - [ ] 14.8 Implement `GET /api/analytics`, `GET /api/policies/compare`, and `GET /api/patients/search`
-    - Denials-by-payer aggregation, resolution rate, average time-to-resolution, at-risk list; per-payer policy retrieval and diff explanation for a procedure code; patient-name search
+    - Denials-by-payer aggregation grouping Cases by the Case payer reference (`Case.payerId`/`Case.payerName`), placing every Case whose payer reference is unset into a single "Unknown payer" bucket so grouped totals equal the number of Cases with a denial reason; resolution rate, average time-to-resolution, at-risk list; per-payer policy retrieval and diff explanation for a procedure code; patient-name search
     - _Requirements: 14.1, 14.2, 14.3, 14.4, 17.1, 17.2, 19.2_
 
   - [ ]* 14.9 Write property test for denials-by-payer aggregation
     - **Property 32: Denials-by-payer aggregation is exact**
+    - Assert grouping by the Case payer reference with an "Unknown payer" bucket for unset payers, and that the sum of all reported counts (including the bucket) equals the total number of Cases with a denial reason
     - **Validates: Requirements 14.1**
 
   - [ ]* 14.10 Write property test for policy comparison retrieval
@@ -359,7 +369,10 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [ ] 15. Implement the human-action API
   - [ ] 15.1 Implement `POST /api/cases/[id]/action`
     - Handle Approve (→ AppealSent, simulated send only), Reject (→ NeedsHumanInput), Edit (store revised content), Request More Evidence (append context, re-invoke `runAgent`); record a `human_action` Trace_Step for each; never mark sent without a recorded Approve; 400 on malformed payloads
-    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 16.1, 16.2_
+    - Also handle the two Case_Outcome action types for Cases in status `AppealSent`: `appeal_won` → `Resolved` and `appeal_denied` → `DeniedFinal`, setting `Case.resolvedAt` to the processing timestamp and recording a `human_action` Trace_Step describing the outcome
+    - Reject any Case_Outcome action when the Case status is not `AppealSent`, leaving status and `resolvedAt` unchanged, recording no Trace_Step, and returning a message identifying that the Case must be in status `AppealSent`
+    - Perform the status change, `resolvedAt` update, and Trace_Step write atomically so that a persistence failure rolls back all three effects (Case retains `AppealSent` and its prior `resolvedAt`) and returns a message indicating the outcome was not recorded
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 16.1, 16.2, 24.2, 24.3, 24.4, 24.5, 24.6_
 
   - [ ]* 15.2 Write property test for approve and reject transitions
     - **Property 22: Approve and reject transitions**
@@ -381,6 +394,21 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 26: Re-runs grow the audit trail without loss**
     - **Validates: Requirements 16.2**
 
+  - [ ]* 15.7 Write property test for case outcome transitions from AppealSent
+    - **Property 54: Case outcome transitions from AppealSent**
+    - Assert `appeal_won` sets status `Resolved` and `appeal_denied` sets status `DeniedFinal`; in both cases `Case.resolvedAt` is set to the processing timestamp and exactly one new `human_action` Trace_Step describing the outcome is recorded
+    - **Validates: Requirements 24.2, 24.3**
+
+  - [ ]* 15.8 Write property test for outcome actions rejected outside AppealSent
+    - **Property 55: Outcome actions rejected outside AppealSent**
+    - Assert that for any non-`AppealSent` status either Case_Outcome action is rejected, leaving status and `resolvedAt` unchanged, adding no Trace_Step, and returning the "must be in status AppealSent" message
+    - **Validates: Requirements 24.1, 24.4**
+
+  - [ ]* 15.9 Write property test for outcome persistence failure rolling back atomically
+    - **Property 56: Outcome persistence failure rolls back atomically**
+    - Assert that when persisting the status change, `resolvedAt`, or the Trace_Step fails, all three effects roll back (Case retains `AppealSent` and its prior `resolvedAt`, no partial Trace_Step) and a message indicating the outcome was not recorded is returned
+    - **Validates: Requirements 24.5**
+
 - [ ] 16. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
@@ -395,8 +423,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 
 - [ ] 18. Implement the Intake page
   - [ ] 18.1 Build `app/intake/page.tsx` with `IntakeForm`
-    - Textarea + file upload + intake-type select; POST `/api/cases`; redirect to the Case Detail page on the returned caseId
-    - _Requirements: 1.6, 10.4_
+    - Textarea + file upload + intake-type select + an urgent toggle that defaults to off (drives `Case.isUrgent` and the SLA deadline); POST `/api/cases`; redirect to the Case Detail page on the returned caseId
+    - _Requirements: 1.6, 1.7, 10.4_
 
   - [ ]* 18.2 Write component test for intake redirect
     - Assert successful submission redirects to `/case/[id]`
@@ -414,11 +442,13 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [ ] 20. Implement the Case Detail page
   - [ ] 20.1 Build `app/case/[id]/page.tsx` facts panel, live trace, and action zone
     - `CaseFactsPanel` (extracted fields with confidence chips and expandable source tags); `LiveTracePanel` polling `/trace` every 1s while Investigating with Framer Motion entrance, labeling each trace line with a stage icon/label derived from its `stepType` (🩺 medical_review, 📚 policy_review, 🎯 strategy, ✅ verification, 🤖 decision, plus the tool name for tool_call steps); `HumanActionZone` (recommendation + Approve/Edit/Request More Evidence/Reject + appeal PDF preview/download + plain-English explanation) wired to `/action`, displaying each flagged issue alongside the recommendation when the stored `verificationResult.status` is `fail`
-    - _Requirements: 7.5, 8.1, 11.1, 11.2, 11.4, 11.5, 13.1, 13.2, 13.3, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6_
+    - In `HumanActionZone`, when the Case status is `AppealSent`, show the two Case_Outcome controls **Appeal Won** and **Appeal Denied** (which POST `appeal_won`/`appeal_denied` to `/action`); show these controls only for `AppealSent` cases and hide them in every other status
+    - _Requirements: 7.5, 8.1, 11.1, 11.2, 11.4, 11.5, 13.1, 13.2, 13.3, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6, 24.1_
 
   - [ ]* 20.2 Write component tests for panels, polling, stage labels, and flagged issues
     - Assert fact/source-tag expansion, 1s trace polling and chronological append, per-stepType stage icon/label rendering in the live trace (11.5, 20.7–20.10), action buttons in AwaitingApproval, appeal preview/download when present, plain-English display, and flagged-issue display in HumanActionZone when `verificationResult.status` is `fail` (22.6)
-    - _Requirements: 11.1, 11.2, 11.4, 11.5, 13.2, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6_
+    - Assert the Appeal Won / Appeal Denied controls render only when the Case status is `AppealSent` and are hidden in every other status (24.1)
+    - _Requirements: 11.1, 11.2, 11.4, 11.5, 13.2, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6, 24.1_
 
 - [ ] 21. Implement the Audit and Analytics pages
   - [ ] 21.1 Build `app/case/[id]/audit/page.tsx` and `app/analytics/page.tsx`
@@ -444,7 +474,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation tasks are never optional.
-- Each task references specific granular requirements for traceability, and every one of the 52 correctness properties maps to exactly one property-based test sub-task.
+- Each task references specific granular requirements for traceability, and every one of the 56 correctness properties maps to exactly one property-based test sub-task.
 - Property-based tests use fast-check with Vitest at ≥100 iterations, tagged `// Feature: authpilot, Property {number}: {property_text}`; Qwen and the NIH API are replaced with deterministic fakes and the database uses an in-memory/temporary SQLite instance. Stage parallelism (Property 37) is validated with instrumented per-stage start/end timestamps rather than wall-clock timing.
 - Architectural/wiring guarantees (Requirements 5.2, 7.2, 17.3, 20.3, 20.11, 20.12) and UI stage labeling / flagged-issue rendering (Requirements 11.5, 20.7–20.10, 22.6) are covered by smoke/example/component tests rather than property tests, consistent with the design's testing strategy.
 - UI, library-bound (PDF/text extraction), and one-shot setup behaviors are covered by component, integration, and smoke tests rather than property tests.
@@ -463,14 +493,14 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     { "id": 5, "tasks": ["7.8", "7.9", "11.3"] },
     { "id": 6, "tasks": ["11.1", "11.4"] },
     { "id": 7, "tasks": ["11.2", "11.5", "13.1"] },
-    { "id": 8, "tasks": ["11.6", "11.7", "13.2", "13.3", "13.4"] },
+    { "id": 8, "tasks": ["11.6", "11.7", "11.32", "13.2", "13.3", "13.4"] },
     { "id": 9, "tasks": ["11.8", "11.9"] },
     { "id": 10, "tasks": ["11.10", "11.11", "11.12", "11.13"] },
     { "id": 11, "tasks": ["11.14", "11.15"] },
     { "id": 12, "tasks": ["11.16", "11.17", "11.18"] },
     { "id": 13, "tasks": ["11.19", "11.20", "11.21", "11.22", "11.23"] },
     { "id": 14, "tasks": ["11.24", "11.25", "15.1"] },
-    { "id": 15, "tasks": ["11.26", "11.27", "11.28", "11.29", "11.30", "11.31", "15.2", "15.3", "15.4", "15.5", "15.6"] },
+    { "id": 15, "tasks": ["11.26", "11.27", "11.28", "11.29", "11.30", "11.31", "15.2", "15.3", "15.4", "15.5", "15.6", "15.7", "15.8", "15.9"] },
     { "id": 16, "tasks": ["17.1", "18.1", "19.1", "20.1", "21.1", "22.1"] },
     { "id": 17, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2"] }
   ]
