@@ -9,7 +9,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [ ] 1. Scaffold project and shared foundations
   - Initialize a Next.js 14 (App Router) + TypeScript project with Tailwind, shadcn/ui, Recharts, and Framer Motion
   - Add Vitest and fast-check; configure a test script and a shared fast-check config (`{ numRuns: 100 }`)
-  - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `PipelineStage`, `intakeType`, `sourceType`, `stepType` (the seven allowed values), `Recommendation`, `AppealContent`, `StrategyOption`/`StrategyOptions`, `FlaggedIssue`/`VerificationResult`
+  - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `PipelineStage`, `intakeType`, `sourceType`, `stepType` (the seven allowed values), `Recommendation`, `AppealContent`, `StrategyOption`/`StrategyOptions`, `FlaggedIssue`/`VerificationResult`, plus the hardening types `Finding`/`FindingKind`/`FindingSeverity`, `QwenOutcome`/`QwenFailure`/`QwenFailureKind`, `AuditVerifyResult`, and the status-transition types used by the case-status state machine
   - _Requirements: 5.7, 5.8, 5.9, 23.3_
 
 - [ ] 2. Define the data layer with Prisma
@@ -17,9 +17,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Define `Patient`, `ChartNote`, `Payer`, `PayerPolicy`, `Case`, `ExtractedField`, `TraceStep` models per the design, including `Case.isUrgent`, `resolutionPath`, `denialReason`, `requestedEvidence`, `plainEnglishExplanation`, `recommendation`, `appealPdfUrl`, `resolvedAt`, and the multi-stage pipeline fields `Case.strategyOptions` (Json?) and `Case.verificationResult` (Json?)
     - Add the Case payer reference to the schema: `Case.payerId` (String?, optional relation to `Payer`) and the `Case.payerName` (String?) convenience field used as the denials-by-payer analytics grouping key, plus the corresponding `Payer.cases Case[]` reverse relation
     - Extend `TraceStep.stepType` to allow the seven values `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`
+    - Add the audit-chain fields to `TraceStep` (each Trace_Step and each `human_action` audit event): `prevHash` (String), `hash` (String), and the mutating-change capture fields `beforeState` (Json?) and `afterState` (Json?), so each audit event stores its own hash and the hash of the immediately preceding event
+    - Add an `IdempotencyKey` model (`key` unique, `caseId`, `operation`, `result` Json, `createdAt`) that records a client-supplied Idempotency_Key with the stored result of the mutating operation it guarded
     - Configure SQLite datasource and add a shared Prisma client module in `lib/db.ts`
     - Add a test helper that spins up an in-memory/temporary SQLite instance for tests
-    - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3_
+    - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3, 25.1, 25.3, 26.2_
 
   - [ ] 2.2 Implement the stepType validation guard
     - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
@@ -34,7 +36,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - [ ] 3.1 Implement `decide()` in `lib/decisionEngine.ts`
     - Evaluate rules in order: iterations-exhausted OR contradictionCount > 0 → Escalate_To_Human (NeedsHumanInput); confidence > 85 → Auto_Draft (AwaitingApproval); 60 ≤ confidence ≤ 85 → Draft_And_Request_Evidence (AwaitingApproval); confidence < 60 → Escalate_To_Human (NeedsHumanInput)
     - Return `{ path, status }` with status derived from path
-    - _Requirements: 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9_
+    - Treat the `contradictionCount` input as the number of blocking Findings supplied by the caller (see `lib/findings.ts`), so escalation-by-findings depends only on blocking findings
+    - _Requirements: 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9, 29.4_
 
   - [ ]* 3.2 Write property test for the Decision_Engine mapping
     - **Property 14: Decision engine mapping**
@@ -67,15 +70,22 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 6. Implement the Qwen_Client
-  - [ ] 6.1 Implement `callQwen()` with retry in `lib/qwen.ts`
-    - Typed wrapper over the DashScope/OpenRouter chat-completions endpoint with `tools` (function-calling) support; parse `toolCalls`/`content`; read `QWEN_API_KEY`/`QWEN_API_BASE`
-    - Retry transient failures up to 2 additional times (3 attempts total); throw `QwenUnavailableError` after the third failure
-    - _Requirements: 6.5_
+  - [ ] 6.1 Implement resilient `callQwen()` in `lib/qwen.ts`
+    - Typed wrapper over the DashScope/OpenRouter chat-completions endpoint with `tools` (function-calling) support; parse `toolCalls`/`content`; read `QWEN_API_KEY`/`QWEN_API_BASE` and a per-attempt timeout (`QWEN_ATTEMPT_TIMEOUT_MS`)
+    - Wrap each attempt in a bounded per-attempt timeout; retry only transient failures (network error, per-attempt timeout, or HTTP 429/500/502/503/504) using exponential backoff up to the 3-attempt total (original + 2); on a permanent failure (HTTP 4xx other than 429, or a malformed/empty response) stop immediately without a further retry
+    - Add the pure, table-driven `classifyQwenFailure(err)` classifier mapping an error shape (`{ status?, timedOut?, body? }`) to `{ kind, transient }`, and use it inside `callQwen`
+    - Never throw: resolve to a structured `QwenOutcome` — `{ ok: true, ... }` on success or a `QwenFailure { ok: false, kind, transient, attempts, detail }` on exhaustion or permanent failure — reported to the Agent_Runner
+    - _Requirements: 6.5, 6.6, 6.7, 6.8_
 
   - [ ]* 6.2 Write property test for the retry bound
     - **Property 18: Qwen client retry bound**
     - **Validates: Requirements 6.5**
     - Use a deterministic fake that fails a configurable number of consecutive times
+
+  - [ ]* 6.3 Write property test for transient-vs-permanent retry classification
+    - **Property 57: Qwen transient-vs-permanent retry classification**
+    - **Validates: Requirements 6.6, 6.7, 6.8**
+    - Drive `classifyQwenFailure` and `callQwen` with generated failure sequences; assert transient runs make at most 3 attempts with exponential backoff and permanent failures return a structured `QwenFailure` on the first-failure attempt with no further retry
 
 - [ ] 7. Implement the Agent_Tools
   - [ ] 7.1 Implement Prisma-backed tools in `lib/agentTools.ts`
@@ -163,11 +173,20 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 13: Stale chart notes are flagged at the 90-day boundary**
     - **Validates: Requirements 4.3**
 
+  - [ ] 10.9 Implement the structured Findings module in `lib/findings.ts`
+    - Define `Finding` (`findingId`, `kind`, `severity`, optional `expected`/`actual`, `technicalMessage`, `friendlyMessage`); emit a Finding for every contradiction, gap, policy, and verification issue; always assign contradictions `severity: "blocking"`, and map Verification_QA flagged issues to `blocking` or `warning` according to their effect on appeal validity
+    - Implement `blockingCount(findings)` (the value fed to the Decision_Engine as `contradictionCount`) and `shouldEscalate(findings)` (true iff at least one blocking finding exists); surface `warning` findings without forcing escalation
+    - _Requirements: 29.1, 29.2, 29.3_
+
+  - [ ]* 10.10 Write property test for findings-driven escalation
+    - **Property 64: Escalation is driven only by blocking findings**
+    - **Validates: Requirements 29.2, 29.4, 29.5**
+
 - [ ] 11. Implement the Agent_Runner nine-stage pipeline
   - [ ] 11.1 Implement pipeline scaffolding and stage orchestration in `lib/agentRunner.ts`
     - Define the `PipelineStage` union and a `runStage(caseId, stage, ...)` helper that runs a bounded (≤ 8 iteration) plan→tool_call→observe cycle under a stage-specific system prompt and the stage's tool allow-list, tagging every Trace_Step it writes with the stage; sequence the stages in order (Intake_And_Extraction → Medical_Review/Policy_Review → Strategy → Decision_Intelligence → Appeal_Generation → Verification_QA), persisting each iteration's Trace_Steps/Extracted_Fields before the next call
-    - On loop exhaustion without a decision, force Escalate_To_Human and record a Trace_Step with reasoning "needs manual review"; catch `QwenUnavailableError` and escalate; if any stage throws, record a failure Trace_Step naming the affected stage, set Escalate_To_Human, and do not run subsequent stages
-    - _Requirements: 6.1, 6.2, 6.3, 6.4, 20.1, 20.5, 20.6_
+    - On loop exhaustion without a decision, force Escalate_To_Human and record a Trace_Step with reasoning "needs manual review"; when `callQwen` reports a structured `QwenFailure`, degrade the calling stage gracefully by setting the Resolution_Path to Escalate_To_Human (NeedsHumanInput) rather than terminating the run abnormally; if any stage throws, record a failure Trace_Step naming the affected stage, set Escalate_To_Human, and do not run subsequent stages
+    - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.9, 20.1, 20.5, 20.6_
 
   - [ ]* 11.2 Write property test for the loop cap forcing escalation
     - **Property 17: Loop cap forces escalation**
@@ -185,7 +204,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - In a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as Extracted_Fields (merging the former document + entity steps into one call); for any of the five that cannot be resolved, record a Trace_Step naming each unresolved field and continue the pipeline without terminating the Case
     - When the extracted patient matches a known `Patient` record, set `Case.patientId` to that record's id; when it does not match, leave `Case.patientId` unset and record the patient as an unresolved field
     - When the extracted payer resolves to a known `Payer`, set the Case payer reference (`Case.payerId` and `Case.payerName`) to that Payer; when it does not resolve, leave both unset and record the payer as an unresolved field
-    - _Requirements: 2.5, 2.6, 2.7, 2.8, 20.3, 20.4, 20.12_
+    - Before the raw Intake text (or any extracted document text) is placed into the extraction prompt, screen it through the Safety_Guard (`screenUntrusted`, `lib/guard.ts`): supply the content to Qwen strictly as fenced, labeled data (never as instructions), and on injection detection record a Trace_Step flagging the attempt
+    - _Requirements: 2.5, 2.6, 2.7, 2.8, 20.3, 20.4, 20.12, 27.1, 27.4, 27.5_
 
   - [ ]* 11.6 Write property test for unresolved intake fields traced without terminating
     - **Property 38: Unresolved intake fields are traced without terminating**
@@ -216,8 +236,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 21.3**
 
   - [ ] 11.13 Implement the Decision_Intelligence stage
-    - Call the pure `decide()` over the Medical_Review, Policy_Review, and Strategy summaries (not raw documents); persist a `decision` Trace_Step storing overall confidence, path, and reasoning; on Auto_Draft/Draft_And_Request_Evidence set AwaitingApproval (recording requested evidence for the medium path) and on Escalate_To_Human set NeedsHumanInput
-    - _Requirements: 5.2, 5.6, 5.7, 5.8, 5.9_
+    - Call the pure `decide()` over the Medical_Review, Policy_Review, and Strategy summaries (not raw documents), passing `contradictionCount = blockingCount(findings)` so routing is driven only by blocking Findings while `warning` findings are surfaced to the reviewer without forcing escalation; persist a `decision` Trace_Step storing overall confidence, path, and reasoning; on Auto_Draft/Draft_And_Request_Evidence set AwaitingApproval (recording requested evidence for the medium path) and on Escalate_To_Human set NeedsHumanInput, performing each Case_Status change through `assertTransition` (`lib/caseStatus.ts`)
+    - _Requirements: 5.2, 5.6, 5.7, 5.8, 5.9, 28.1, 29.4, 29.5_
 
   - [ ]* 11.14 Write property test for decision tracing
     - **Property 16: Decisions are traced**
@@ -237,7 +257,9 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 
   - [ ] 11.18 Implement the Verification_QA stage
     - Independently check every citation against retrieved Payer_Policy/Chart_Note data, every patient/policy/code reference against the Case Extracted_Field values, and every claim against the retrieved evidence; collect all flagged issues; derive `status` as `pass` iff the list is empty else `fail`; on a processing error store `{ status: "fail", flaggedIssues: [{ type: "verification_error", ... }] }`; store `verificationResult`, write `stepType: "verification"`, and only set the verified AwaitingApproval state after the result is stored
-    - _Requirements: 20.10, 22.1, 22.2, 22.3, 22.4, 22.5, 22.7, 23.2_
+    - Add the grounding check: every citation and reference in the Appeal_Packet (payer-policy clause/identifier, chart-note evidence, diagnosis/procedure code, and patient) must resolve to an actual stored record in scope for the Case; for each that does not, add an `unresolved_citation` flagged issue with `severity: "blocking"`, which forces `status: "fail"` so the appeal is never presented as verified
+    - Record each flagged issue as a `Finding` (`lib/findings.ts`) so blocking issues drive routing while warnings stay visible
+    - _Requirements: 20.10, 22.1, 22.2, 22.3, 22.4, 22.5, 22.7, 22.8, 22.9, 23.2, 29.1, 29.3_
 
   - [ ]* 11.19 Write property test for verification flagging all discrepancies
     - **Property 46: Verification flags all discrepancies**
@@ -295,6 +317,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 53: Patient and payer linkage set on resolve, unset otherwise**
     - Assert `Case.patientId` is set to a matched Patient's id when the patient matches and left unset otherwise; the Case payer reference (`payerId`/`payerName`) is set to a resolved Payer and left unset otherwise; and in each unresolved case a Trace_Step identifying that field as unresolved is recorded
     - **Validates: Requirements 2.5, 2.6, 2.7, 2.8**
+
+  - [ ]* 11.33 Write property test for the citation grounding check
+    - **Property 58: Unresolved citations force a blocking verification fail**
+    - **Validates: Requirements 22.8, 22.9**
+    - Assert an `unresolved_citation` blocking issue is added for exactly the citations/references that do not resolve to an in-scope stored record (and none for those that do), and that any unresolved reference forces the stored `verificationResult.status` to `fail`
 
 - [ ] 12. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
@@ -372,7 +399,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Also handle the two Case_Outcome action types for Cases in status `AppealSent`: `appeal_won` → `Resolved` and `appeal_denied` → `DeniedFinal`, setting `Case.resolvedAt` to the processing timestamp and recording a `human_action` Trace_Step describing the outcome
     - Reject any Case_Outcome action when the Case status is not `AppealSent`, leaving status and `resolvedAt` unchanged, recording no Trace_Step, and returning a message identifying that the Case must be in status `AppealSent`
     - Perform the status change, `resolvedAt` update, and Trace_Step write atomically so that a persistence failure rolls back all three effects (Case retains `AppealSent` and its prior `resolvedAt`) and returns a message indicating the outcome was not recorded
-    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 16.1, 16.2, 24.2, 24.3, 24.4, 24.5, 24.6_
+    - Accept a client-supplied `Idempotency-Key` header and wrap submission/approval/outcome/stage-advancing writes in `withIdempotency` (`lib/idempotency.ts`) so a retried request applies its effect at most once and returns the stored original result; perform every Case_Status change through `assertTransition` (`lib/caseStatus.ts`), rejecting illegal transitions and leaving status unchanged
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 16.1, 16.2, 24.2, 24.3, 24.4, 24.5, 24.6, 26.1, 26.4, 26.5, 28.1, 28.2, 28.5_
 
   - [ ]* 15.2 Write property test for approve and reject transitions
     - **Property 22: Approve and reject transitions**
@@ -468,14 +496,66 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert seed counts/content invariants and that reset restores the seeded set
     - _Requirements: 18.1, 18.2, 18.3, 18.4, 18.5_
 
-- [ ] 23. Final checkpoint - Ensure all tests pass
+- [ ] 23. Implement hardening: safety guard, status FSM, audit chain, and idempotency
+  - [ ] 23.1 Implement the Safety_Guard in `lib/guard.ts`
+    - Implement `screenUntrusted` as a deterministic, non-LLM screen that returns the content fenced and labeled as data (never as instructions) and sets `injectionDetected` true iff the text matches at least one prompt-injection / instruction-override pattern; consumed by the Intake_And_Extraction stage (task 11.5) before any Qwen call
+    - _Requirements: 27.2, 27.3_
+
+  - [ ]* 23.2 Write property test for the safety guard
+    - **Property 62: Safety guard fences untrusted content and detects injection deterministically**
+    - **Validates: Requirements 27.2, 27.3, 27.4, 27.5**
+
+  - [ ] 23.3 Implement the case-status state machine in `lib/caseStatus.ts`
+    - Define `ALLOWED_TRANSITIONS` per the Requirement 28 table and `assertTransition(from, to)`: accept iff `to` is in the allowed set for `from`; reject an illegal transition leaving the status unchanged and returning a message identifying it; treat a same-state request as an idempotent no-op success; reject every outgoing transition from a terminal status (`Resolved`, `DeniedFinal`)
+    - Route every status write — runner stage-advances (task 11.13), the action route and Case_Outcome recording (task 15.1) — through `assertTransition`
+    - _Requirements: 28.1, 28.2, 28.3, 28.4, 28.5_
+
+  - [ ]* 23.4 Write property test for the status transition table
+    - **Property 63: Status transitions obey the allowed-transition table**
+    - **Validates: Requirements 28.1, 28.2, 28.3, 28.4, 28.5**
+
+  - [ ] 23.5 Implement the tamper-evident audit chain in `lib/auditChain.ts`
+    - Implement `GENESIS_HASH`, `canonicalSerialize` (deterministic, order-stable), `computeHash(prevHash, content) = sha256(prevHash + canonicalSerialize(content))`, and `verifyAuditChain(caseId)` returning `{ intact, headHash, firstBrokenEventId?, reason? }`
+    - Wire hash-chained writes into the trace-step persistence path (`createTraceStep` in `lib/db.ts`): the first event's `prevHash` is `GENESIS_HASH`, each subsequent event's `prevHash` is the previous event's stored `hash`, and each event captures its `beforeState`/`afterState` for mutating changes
+    - _Requirements: 25.1, 25.2, 25.3, 25.4, 25.7_
+
+  - [ ]* 23.6 Write property test for an untampered chain verifying as intact
+    - **Property 59: Untampered audit chain verifies as intact**
+    - **Validates: Requirements 25.1, 25.2, 25.7**
+
+  - [ ]* 23.7 Write property test for tamper detection and localization
+    - **Property 60: Tampering breaks the chain and the first broken event is identified**
+    - **Validates: Requirements 25.5, 25.6**
+
+  - [ ] 23.8 Implement `GET /api/cases/[id]/audit/verify`
+    - Call `verifyAuditChain(caseId)` and return whether the Audit_Chain is intact together with the head hash (and the first broken event id when broken)
+    - _Requirements: 25.4_
+
+  - [ ] 23.9 Implement idempotency support in `lib/idempotency.ts`
+    - Implement `withIdempotency(key, operation, run)` that applies the effect and stores the result the first time a key is seen and returns the stored original result on any retry with the same key, applying the effect at most once; wired into the action route (task 15.1) for submission/approval/outcome/stage-advance
+    - _Requirements: 26.1, 26.2, 26.3, 26.4, 26.5_
+
+  - [ ]* 23.10 Write property test for idempotent mutating operations
+    - **Property 61: Mutating operations are idempotent under a repeated key**
+    - **Validates: Requirements 26.2, 26.3, 26.4, 26.5**
+
+- [ ] 24. Implement gold-case behavioral evaluation
+  - [ ] 24.1 Build gold-case fixtures and the evaluation runner
+    - Author the `eval/gold/*.json` fixtures (each with a fixed Intake and the expected Resolution_Path and expected triggering Finding identifier(s)) and `scripts/eval.ts` exposing `runGoldCases` that executes each Gold_Case against deterministic fakes and reports a per-case pass/fail; a Gold_Case passes only when both the produced Resolution_Path and the produced triggering Finding identifier(s) match the expected values; note it can gate CI
+    - _Requirements: 30.1, 30.2, 30.3, 30.4_
+
+  - [ ]* 24.2 Write property test for gold-case evaluation
+    - **Property 65: Gold-case evaluation passes iff path and triggering findings match**
+    - **Validates: Requirements 30.2, 30.3, 30.4**
+
+- [ ] 25. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation tasks are never optional.
-- Each task references specific granular requirements for traceability, and every one of the 56 correctness properties maps to exactly one property-based test sub-task.
-- Property-based tests use fast-check with Vitest at ≥100 iterations, tagged `// Feature: authpilot, Property {number}: {property_text}`; Qwen and the NIH API are replaced with deterministic fakes and the database uses an in-memory/temporary SQLite instance. Stage parallelism (Property 37) is validated with instrumented per-stage start/end timestamps rather than wall-clock timing.
+- Each task references specific granular requirements for traceability, and every one of the 65 correctness properties maps to exactly one property-based test sub-task.
+- Property-based tests use fast-check with Vitest at ≥100 iterations, tagged `// Feature: authpilot, Property {number}: {property_text}`; Qwen and the NIH API are replaced with deterministic fakes and the database uses an in-memory/temporary SQLite instance. Stage parallelism (Property 37) is validated with instrumented per-stage start/end timestamps rather than wall-clock timing. Qwen degradation on a structured failure (Requirement 6.9) is covered by an example test that feeds a `QwenFailure` into the runner and asserts Escalate_To_Human / NeedsHumanInput.
 - Architectural/wiring guarantees (Requirements 5.2, 7.2, 17.3, 20.3, 20.11, 20.12) and UI stage labeling / flagged-issue rendering (Requirements 11.5, 20.7–20.10, 22.6) are covered by smoke/example/component tests rather than property tests, consistent with the design's testing strategy.
 - UI, library-bound (PDF/text extraction), and one-shot setup behaviors are covered by component, integration, and smoke tests rather than property tests.
 - Checkpoints ensure incremental validation at natural boundaries (pure logic, tools/PDF, the nine-stage runner, APIs, and final).
@@ -488,21 +568,21 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     { "id": 0, "tasks": ["1.1"] },
     { "id": 1, "tasks": ["2.1"] },
     { "id": 2, "tasks": ["2.2", "3.1", "3.3", "4.1", "6.1", "7.1", "7.5", "8.1", "14.1", "14.3", "14.5", "14.8"] },
-    { "id": 3, "tasks": ["2.3", "3.2", "3.4", "4.2", "4.3", "6.2", "7.2", "7.3", "7.4", "7.6", "8.2", "8.3", "10.1", "10.5", "14.2", "14.4", "14.6", "14.7", "14.9", "14.10", "14.11", "14.12"] },
-    { "id": 4, "tasks": ["7.7", "10.2", "10.3", "10.4", "10.6", "10.7", "10.8"] },
-    { "id": 5, "tasks": ["7.8", "7.9", "11.3"] },
-    { "id": 6, "tasks": ["11.1", "11.4"] },
+    { "id": 3, "tasks": ["2.3", "3.2", "3.4", "4.2", "4.3", "6.2", "6.3", "7.2", "7.3", "7.4", "7.6", "8.2", "8.3", "10.1", "10.5", "10.9", "14.2", "14.4", "14.6", "14.7", "14.9", "14.10", "14.11", "14.12"] },
+    { "id": 4, "tasks": ["7.7", "10.2", "10.3", "10.4", "10.6", "10.7", "10.8", "10.10"] },
+    { "id": 5, "tasks": ["7.8", "7.9", "11.3", "23.1", "23.3", "23.5", "23.9"] },
+    { "id": 6, "tasks": ["11.1", "11.4", "23.2", "23.4", "23.6", "23.7", "23.8", "23.10"] },
     { "id": 7, "tasks": ["11.2", "11.5", "13.1"] },
     { "id": 8, "tasks": ["11.6", "11.7", "11.32", "13.2", "13.3", "13.4"] },
     { "id": 9, "tasks": ["11.8", "11.9"] },
     { "id": 10, "tasks": ["11.10", "11.11", "11.12", "11.13"] },
     { "id": 11, "tasks": ["11.14", "11.15"] },
     { "id": 12, "tasks": ["11.16", "11.17", "11.18"] },
-    { "id": 13, "tasks": ["11.19", "11.20", "11.21", "11.22", "11.23"] },
+    { "id": 13, "tasks": ["11.19", "11.20", "11.21", "11.22", "11.23", "11.33"] },
     { "id": 14, "tasks": ["11.24", "11.25", "15.1"] },
     { "id": 15, "tasks": ["11.26", "11.27", "11.28", "11.29", "11.30", "11.31", "15.2", "15.3", "15.4", "15.5", "15.6", "15.7", "15.8", "15.9"] },
-    { "id": 16, "tasks": ["17.1", "18.1", "19.1", "20.1", "21.1", "22.1"] },
-    { "id": 17, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2"] }
+    { "id": 16, "tasks": ["17.1", "18.1", "19.1", "20.1", "21.1", "22.1", "24.1"] },
+    { "id": 17, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2", "24.2"] }
   ]
 }
 ```
