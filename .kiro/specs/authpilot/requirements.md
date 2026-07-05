@@ -41,6 +41,15 @@ This document defines the requirements for the full application: a Next.js 14 (A
 - **Analytics_Page**: The `/analytics` page presenting denial-intelligence charts.
 - **Operator**: A front-office/billing staff member or physician who uses AuthPilot.
 - **Case payer reference**: The payer stored directly on a Case (Case.payerId and the convenience field Case.payerName), set during the Intake_And_Extraction stage when the payer is resolved, used as the grouping key for denials-by-payer analytics independently of any linked Patient.
+- **Audit_Chain**: The tamper-evident sequence of audit events (Trace_Step and Human_Action records) for a Case in which each event stores the hash of the immediately preceding event (prevHash) and its own hash (hash) computed over a Canonical_Serialization of the event content, forming a linked chain that starts from the fixed Genesis_Hash.
+- **Genesis_Hash**: The fixed, well-known starting hash value used as the prevHash of the first audit event in a Case Audit_Chain.
+- **Canonical_Serialization**: The deterministic, order-stable textual representation of an audit event content used as the input to hash computation, so that identical content always produces the same hash.
+- **Idempotency_Key**: A client-supplied identifier accompanying a mutating operation that allows the AuthPilot to recognize a retried operation and apply the operation effect at most once.
+- **Safety_Guard**: The deterministic, non-LLM screening component that fences untrusted Intake text or extracted document text as data and detects prompt-injection or instruction-override patterns before the content is included in a Qwen_Client prompt.
+- **Finding**: A structured contradiction, gap, policy, or verification issue that carries a stable finding identifier, a Finding_Severity, the expected and actual values where applicable, a technical message, and a patient/operator-friendly message.
+- **Finding_Severity**: The severity of a Finding, one of "warning" or "blocking".
+- **Status_Transition**: An ordered pair of Case_Status values (from-status, to-status) representing a requested change to a Case Case_Status, evaluated against the allowed-transition set.
+- **Gold_Case**: A stored evaluation case with a fixed Intake and expected outcomes — the expected Resolution_Path and the expected triggering Finding identifier(s) — used to detect decision-logic regressions.
 
 ## Requirements
 
@@ -129,6 +138,10 @@ This document defines the requirements for the full application: a Next.js 14 (A
 3. WHEN the Agent_Runner completes one loop iteration, THE Agent_Runner SHALL persist all Trace_Step and Extracted_Field records produced in that iteration before beginning the next iteration.
 4. IF the agent loop reaches 8 iterations without producing a final decision, THEN THE Agent_Runner SHALL stop the loop, set the Resolution_Path to Escalate_To_Human, and record a Trace_Step with reasoning "needs manual review".
 5. IF a call to the Qwen_Client fails, THEN THE Qwen_Client SHALL retry the call up to 2 additional times before reporting failure to the Agent_Runner.
+6. WHEN the Qwen_Client issues a request attempt, THE Qwen_Client SHALL apply a bounded timeout to that attempt.
+7. IF a Qwen_Client attempt fails with a transient failure — a network error, a request timeout, or an HTTP 429, 500, 502, 503, or 504 response — THEN THE Qwen_Client SHALL retry the call using exponential backoff, up to the 3-attempt total established in Requirement 6.5.
+8. IF a Qwen_Client attempt fails with a permanent failure — an HTTP 4xx response other than 429, or a malformed or empty response — THEN THE Qwen_Client SHALL report a structured failure result to the Agent_Runner on that attempt without performing a further retry.
+9. WHEN the Qwen_Client reports a structured failure result to the Agent_Runner, THE Agent_Runner SHALL degrade the calling Pipeline_Stage gracefully by setting the Resolution_Path to Escalate_To_Human rather than terminating the run abnormally.
 
 ### Requirement 7: Appeal Packet Generation
 
@@ -319,6 +332,8 @@ This document defines the requirements for the full application: a Next.js 14 (A
 5. THE AuthPilot SHALL NOT present a Case for Human_Approval until the Verification_QA stage has completed and its Verification_Result has been stored on the Case.
 6. IF the Verification_Result status is fail, THEN THE AuthPilot SHALL display each flagged issue alongside the recommendation in the human action zone.
 7. IF the Verification_QA stage cannot complete its checks due to a processing error, THEN THE AuthPilot SHALL store a Verification_Result with status fail and a flagged issue indicating that verification could not be completed, and SHALL NOT present the Case for Human_Approval as verified.
+8. WHEN an Appeal_Packet is generated for a Case, THE Verification_QA stage SHALL verify that every citation and reference in the Appeal_Packet — the payer policy clause or identifier, the chart-note evidence, the diagnosis or procedure code, and the patient — resolves to an actual stored record in scope for the Case.
+9. IF a citation or reference in the Appeal_Packet does not resolve to a stored record in scope for the Case, THEN THE Verification_QA stage SHALL add the unresolved citation or reference as a blocking flagged issue and THE AuthPilot SHALL set the Verification_Result status to fail so the appeal is not presented as verified.
 
 ### Requirement 23: Pipeline Data Persistence
 
@@ -345,3 +360,88 @@ This document defines the requirements for the full application: a Next.js 14 (A
 4. IF an Operator attempts a Case_Outcome action on a Case whose status is not "AppealSent", THEN THE AuthPilot SHALL reject the action, leave the Case_Status and Case.resolvedAt unchanged, record no Trace_Step, and return a message identifying that the Case must be in status "AppealSent" for the action to proceed.
 5. IF the AuthPilot cannot persist the Case_Status change, the Case.resolvedAt value, or the Trace_Step while processing a Case_Outcome action, THEN THE AuthPilot SHALL roll back all three effects so the Case retains status "AppealSent" with its prior Case.resolvedAt value, and return a message indicating the outcome was not recorded.
 6. WHEN a Case reaches status "Resolved" or "DeniedFinal", THE AuthPilot SHALL retain the Case.resolvedAt value for use by the resolution-rate and average-time-to-resolution analytics.
+
+### Requirement 25: Tamper-Evident Audit Chain
+
+**User Story:** As a compliance-conscious operator, I want every audit event chained by hash to the one before it, so that any later tampering with the record is detectable.
+
+#### Acceptance Criteria
+
+1. WHEN the AuthPilot records a Trace_Step or Human_Action audit event for a Case, THE AuthPilot SHALL compute the event hash over a Canonical_Serialization of the audit event content and store both that hash and the prevHash referencing the immediately preceding audit event hash.
+2. WHEN the AuthPilot records the first audit event for a Case, THE AuthPilot SHALL set the prevHash of that audit event to the fixed Genesis_Hash.
+3. WHEN an audit event records a mutating change to a Case, THE AuthPilot SHALL capture the before-state and the after-state of the changed fields within the audit event content.
+4. THE AuthPilot SHALL provide an integrity-verification operation that re-walks the Audit_Chain for a Case and returns whether the Audit_Chain is intact together with the head hash, where the head hash is the stored hash of the most recent audit event.
+5. IF the recomputed hash of an audit event does not equal the stored hash of that audit event, THEN the integrity-verification operation SHALL report the Audit_Chain as broken and identify the first broken audit event.
+6. IF the stored prevHash of an audit event does not equal the stored hash of the immediately preceding audit event, THEN the integrity-verification operation SHALL report the Audit_Chain as broken and identify the first broken audit event.
+7. WHEN the integrity-verification operation finds no recomputed-hash mismatch and no prevHash linkage mismatch across all audit events for a Case, THE AuthPilot SHALL report the Audit_Chain as intact and return the head hash.
+
+### Requirement 26: Idempotent Mutating Operations
+
+**User Story:** As an operator, I want retried actions to take effect only once, so that a network retry never sends an appeal twice or advances a case twice.
+
+#### Acceptance Criteria
+
+1. THE AuthPilot SHALL accept a client-supplied Idempotency_Key with every mutating operation, including appeal submission, appeal approval, Case_Outcome recording, and stage-advancing status writes.
+2. WHEN a mutating operation is received with an Idempotency_Key that has not been previously processed, THE AuthPilot SHALL apply the operation effect once and store the operation result together with that Idempotency_Key.
+3. WHEN a mutating operation is retried with an Idempotency_Key that has already been processed, THE AuthPilot SHALL return the stored original result and SHALL apply the operation effect at most once across all retries with that Idempotency_Key.
+4. IF a retried appeal-submission operation carries an already-processed Idempotency_Key, THEN THE AuthPilot SHALL return the original submission result without submitting the appeal a second time.
+5. IF a retried stage-advancing operation carries an already-processed Idempotency_Key, THEN THE AuthPilot SHALL return the original result without advancing the Case_Status a second time.
+
+### Requirement 27: Untrusted Content Safety Guard
+
+**User Story:** As a physician, I want untrusted intake and document text screened before it reaches the model, so that a denial letter cannot hijack the agent with hidden instructions.
+
+#### Acceptance Criteria
+
+1. WHEN raw Intake text or extracted document text is incorporated into any prompt to the Qwen_Client, THE AuthPilot SHALL first screen the content with the Safety_Guard before the model call.
+2. WHEN the Safety_Guard screens untrusted content, THE Safety_Guard SHALL fence the content and mark it as data rather than instructions within the prompt.
+3. WHEN the Safety_Guard screens untrusted content, THE Safety_Guard SHALL detect prompt-injection and instruction-override patterns using deterministic rules without invoking any language model.
+4. IF the Safety_Guard detects an injection attempt in untrusted content, THEN THE AuthPilot SHALL record a Trace_Step flagging the detected injection attempt.
+5. IF the Safety_Guard detects an injection attempt in untrusted content, THEN THE AuthPilot SHALL treat the untrusted content as data only and SHALL NOT allow the untrusted content to be interpreted as agent instructions.
+
+### Requirement 28: Case Status State Machine
+
+**User Story:** As an operator, I want case status changes constrained to a defined set of transitions, so that a case can never enter an inconsistent or impossible state.
+
+#### Acceptance Criteria
+
+The allowed Status_Transitions are defined by the following table. Any (from-status, to-status) pair not listed is an illegal transition.
+
+| From status | Allowed to-status |
+|---|---|
+| New | Investigating |
+| Investigating | AwaitingApproval, NeedsHumanInput |
+| AwaitingApproval | AppealSent, NeedsHumanInput |
+| NeedsHumanInput | Investigating, AwaitingApproval |
+| AppealSent | Resolved, DeniedFinal |
+| Resolved | (terminal — none) |
+| DeniedFinal | (terminal — none) |
+
+1. THE AuthPilot SHALL restrict allowed Status_Transitions to the set defined in the table above.
+2. IF a requested Status_Transition has a to-status that differs from its from-status and is not in the allowed set, THEN THE AuthPilot SHALL reject the transition, leave the Case_Status unchanged, and return a message identifying the illegal Status_Transition.
+3. WHEN a requested Status_Transition has a to-status equal to its from-status, THE AuthPilot SHALL treat the transition as an idempotent no-op and return success while leaving the Case_Status unchanged.
+4. THE AuthPilot SHALL treat "Resolved" and "DeniedFinal" as terminal statuses that have no allowed outgoing Status_Transition.
+5. IF a Status_Transition is requested from the terminal status "Resolved" or "DeniedFinal" to a different status, THEN THE AuthPilot SHALL reject the transition and leave the Case_Status unchanged.
+
+### Requirement 29: Structured Findings with Stable Identifiers and Severity
+
+**User Story:** As a physician, I want every contradiction, gap, policy issue, and verification issue expressed as a structured finding with a severity, so that only genuinely blocking problems force escalation while warnings stay visible.
+
+#### Acceptance Criteria
+
+1. WHEN the AuthPilot produces a contradiction, gap, policy, or verification issue, THE AuthPilot SHALL record it as a Finding carrying a stable finding identifier, a Finding_Severity of "warning" or "blocking", the expected and actual values where applicable, a technical message, and a patient/operator-friendly message.
+2. WHEN the AuthPilot detects a contradiction for a Case, THE AuthPilot SHALL assign the corresponding Finding a Finding_Severity of "blocking".
+3. WHEN a Verification_QA flagged issue is recorded as a Finding, THE AuthPilot SHALL assign the Finding a Finding_Severity of "blocking" or "warning" according to its effect on appeal validity.
+4. WHEN the AuthPilot routes a Case to Escalate_To_Human or to status "NeedsHumanInput" based on Findings, THE AuthPilot SHALL base that routing only on Findings whose Finding_Severity is "blocking".
+5. WHERE a Finding has a Finding_Severity of "warning", THE AuthPilot SHALL surface the Finding to the reviewer without forcing escalation to Escalate_To_Human or to status "NeedsHumanInput".
+
+### Requirement 30: Gold-Case Decision Evaluation
+
+**User Story:** As a practice manager, I want a set of gold evaluation cases with expected outcomes, so that a change to the decision logic that breaks a known case is caught automatically.
+
+#### Acceptance Criteria
+
+1. THE AuthPilot SHALL include a set of Gold_Cases, each asserting the expected Resolution_Path and the expected triggering Finding identifier(s).
+2. WHEN the Gold_Case evaluation operation runs, THE AuthPilot SHALL execute each Gold_Case and compare the produced Resolution_Path and triggering Finding identifier(s) against the expected values for that Gold_Case.
+3. WHEN the Gold_Case evaluation operation completes, THE AuthPilot SHALL report a per-case pass or fail result, where a Gold_Case passes only when the produced Resolution_Path and the produced triggering Finding identifier(s) match the expected values.
+4. IF a Gold_Case produces a Resolution_Path or a triggering Finding identifier that differs from its expected values, THEN THE AuthPilot SHALL report that Gold_Case as failed.
