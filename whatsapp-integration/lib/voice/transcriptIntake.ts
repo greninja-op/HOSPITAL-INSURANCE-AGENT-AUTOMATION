@@ -1,8 +1,8 @@
 /**
  * Voice channel — lightweight transcript intake.
  *
- * DELIBERATELY NOT the full WebRTC/ElevenLabs media bridge from the reference project
- * (aiortc, TURN, WhatsApp Business Calling) — that is a separate multi-service stack far
+ * DELIBERATELY NOT a full real-time voice/telephony media bridge — that would be a
+ * separate multi-service stack far
  * too heavy for AuthPilot's single-repo Next.js demo. Instead we adopt only the *pattern*
  * the brief already lists as a nice-to-have (feature #16): a phone/voice call is captured
  * as a transcript and fed into the normal intake pipeline exactly like a "phone_note".

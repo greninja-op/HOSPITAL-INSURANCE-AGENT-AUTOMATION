@@ -6,7 +6,6 @@ dist
 .github
 *.md
 docs
-Memoire-main
 whatsapp-integration
 .env
 .env*.local

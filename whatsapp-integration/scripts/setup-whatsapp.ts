@@ -6,8 +6,6 @@
  *
  * This configures the tap-to-start prompts a patient sees, plus slash-commands for
  * staff. It is NOT part of the runtime request path.
- *
- * Adapted for AuthPilot from the Memoire setup-icebreakers script.
  */
 const API_VERSION = process.env.WHATSAPP_API_VERSION ?? "v23.0";
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;

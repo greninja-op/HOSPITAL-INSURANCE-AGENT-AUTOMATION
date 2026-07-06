@@ -55,8 +55,7 @@ the untrusted-content Safety Guard before it reaches Qwen.
 
 ## Voice channel (out of scope for the demo)
 
-The reference project shipped a full WhatsApp Business Calling bridge (WebRTC/aiortc +
-ElevenLabs + TURN, a separate Python service). That is deliberately **not** recreated here —
+A full real-time WhatsApp voice/calling bridge is deliberately **not** built here —
 it's a multi-service media stack that doesn't fit AuthPilot's single-repo demo. We adopt only
 the light pattern the brief already lists (feature #16): capture a call transcript and feed it
 through the normal intake pipeline via `lib/voice/transcriptIntake.ts`. If a real-time voice

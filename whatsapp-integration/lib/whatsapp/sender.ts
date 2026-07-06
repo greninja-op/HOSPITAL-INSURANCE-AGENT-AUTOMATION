@@ -9,8 +9,6 @@
  *
  * SAFETY BOUNDARY (AuthPilot): all patient-facing messages are generic, pre-approved
  * templates that carry NO PHI/case specifics — the detail lives in the app/PDF only.
- *
- * Adapted for AuthPilot from the Memoire senderService.
  */
 
 const SEND_TIMEOUT_MS = 8000;

@@ -8,8 +8,6 @@
  * `parseInbound` is a TOTAL function: it never drops a message. Anything it cannot
  * interpret becomes `kind: "unsupported"` with an empty body, so the dedupe + audit
  * trail still records that something arrived.
- *
- * Adapted for AuthPilot from the Memoire reference webhook parser.
  */
 
 export type InboundKind =

@@ -11,8 +11,6 @@
  * as claimable (better to risk a rare double-process than to silently drop a real
  * message). This aligns with AuthPilot's idempotency requirement — the ProcessedMessage
  * table shares the same "at most once" guarantee as the Idempotency_Key store.
- *
- * Adapted for AuthPilot from the Memoire dedupStore.
  */
 
 const RING_CAPACITY = 2000;
