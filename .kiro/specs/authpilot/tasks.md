@@ -78,7 +78,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 31: At-risk boundary**
     - **Validates: Requirements 12.3**
 
-- [ ] 5. Checkpoint - Ensure all tests pass
+- [x] 5. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 6. Implement the Qwen_Client
@@ -99,7 +99,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 6.6, 6.7, 6.8**
     - Drive `classifyQwenFailure` and `callQwen` with generated failure sequences; assert transient runs make at most 3 attempts with exponential backoff and permanent failures return a structured `QwenFailure` on the first-failure attempt with no further retry
 
-- [ ] 7. Implement the Agent_Tools
+- [x] 7. Implement the Agent_Tools
   - [x] 7.1 Implement Prisma-backed tools in `lib/agentTools.ts`
     - `fetchPatientRecord(patientId)` → patient + associated chart notes; `fetchPayerPolicy(payerId, procedureCode)` → matching policy or null; `checkPriorAuthHistory(patientId)` → that patient's cases
     - _Requirements: 3.1, 3.2, 3.4_
@@ -124,7 +124,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Happy-path integration example against the NIH shape (3.3) and the service-unavailable edge case returning `validated: false` (3.7)
     - _Requirements: 3.3, 3.7_
 
-  - [ ] 7.7 Implement `dispatchTool()` centralized dispatch and tracing
+  - [x] 7.7 Implement `dispatchTool()` centralized dispatch and tracing
     - Map Qwen tool name → implementation; wrap every tool in try/catch; record a `tool_call` Trace_Step (tool name, input, output, reasoning, timestamp) on success and on failure; return an error observation instead of throwing
     - _Requirements: 3.5, 3.6_
 
@@ -149,7 +149,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Generate a PDF for a sample case and assert a non-empty stored location reference
     - _Requirements: 7.4_
 
-- [ ] 9. Checkpoint - Ensure all tests pass
+- [x] 9. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 10. Implement entity extraction and detection helpers
@@ -525,7 +525,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - _Requirements: 18.1, 18.2, 18.3, 18.4, 18.5_
 
 - [ ] 23. Implement hardening: safety guard, status FSM, audit chain, and idempotency
-  - [ ] 23.1 Implement the Safety_Guard in `lib/guard.ts`
+  - [x] 23.1 Implement the Safety_Guard in `lib/guard.ts`
     - Implement `screenUntrusted` as a deterministic, non-LLM screen that returns the content fenced and labeled as data (never as instructions) and sets `injectionDetected` true iff the text matches at least one prompt-injection / instruction-override pattern; consumed by the Intake_And_Extraction stage (task 11.5) before any Qwen call
     - _Requirements: 27.2, 27.3_
 
@@ -533,7 +533,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 62: Safety guard fences untrusted content and detects injection deterministically**
     - **Validates: Requirements 27.2, 27.3, 27.4, 27.5**
 
-  - [ ] 23.3 Implement the case-status state machine in `lib/caseStatus.ts`
+  - [x] 23.3 Implement the case-status state machine in `lib/caseStatus.ts`
     - Define `ALLOWED_TRANSITIONS` per the Requirement 28 table and `assertTransition(from, to)`: accept iff `to` is in the allowed set for `from`; reject an illegal transition leaving the status unchanged and returning a message identifying it; treat a same-state request as an idempotent no-op success; reject every outgoing transition from a terminal status (`Resolved`, `DeniedFinal`)
     - Route every status write — runner stage-advances (task 11.13), the action route and Case_Outcome recording (task 15.1) — through `assertTransition`
     - _Requirements: 28.1, 28.2, 28.3, 28.4, 28.5_
@@ -542,7 +542,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 63: Status transitions obey the allowed-transition table**
     - **Validates: Requirements 28.1, 28.2, 28.3, 28.4, 28.5**
 
-  - [ ] 23.5 Implement the tamper-evident audit chain in `lib/auditChain.ts`
+  - [x] 23.5 Implement the tamper-evident audit chain in `lib/auditChain.ts`
     - Implement `GENESIS_HASH`, `canonicalSerialize` (deterministic, order-stable), `computeHash(prevHash, content) = sha256(prevHash + canonicalSerialize(content))`, and `verifyAuditChain(caseId)` returning `{ intact, headHash, firstBrokenEventId?, reason? }`
     - Wire hash-chained writes into the trace-step persistence path (`createTraceStep` in `lib/db.ts`): the first event's `prevHash` is `GENESIS_HASH`, each subsequent event's `prevHash` is the previous event's stored `hash`, and each event captures its `beforeState`/`afterState` for mutating changes
     - _Requirements: 25.1, 25.2, 25.3, 25.4, 25.7_
@@ -734,8 +734,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert an unsupported-type inbound gets the resend-as-text/photo/PDF reply and creates/mutates no Case, and an ambiguous short patient reply with no open-Case context gets a clarifying question and creates no Case
     - _Requirements: 46.1, 46.2, 47.1, 47.2_
 
-- [ ] 27. Implement voice transcript intake
-  - [ ] 27.1 Implement `transcriptToIntake` in `lib/voice/transcriptIntake.ts` and wire a transcript entrypoint
+- [x] 27. Implement voice transcript intake
+  - [x] 27.1 Implement `transcriptToIntake` in `lib/voice/transcriptIntake.ts` and wire a transcript entrypoint
     - Implement the pure `transcriptToIntake(t)` mapping a `Voice_Transcript` to `{ rawText, intakeType: "phone_note" }`, and wire a transcript intake entrypoint that feeds the result through the same create-Case path as any other `phone_note` intake and runs the normal nine-stage pipeline; no real-time media or telephony processing is introduced
     - _Requirements: 37.1, 37.2_
 
