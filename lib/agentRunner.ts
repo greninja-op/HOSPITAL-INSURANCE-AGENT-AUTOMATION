@@ -752,14 +752,269 @@ async function intakeAndExtractionStage(
   };
 }
 
-/** SEAM — Task 11.7 fills the chart-only Medical_Review body (scoped to fetchPatientRecord). */
-function medicalReviewStage(ctx: StageContext): Promise<StageSummary> {
-  return runStageSeam(ctx, "Medical_Review", "11.7");
+// ─── Medical_Review + Policy_Review stage bodies (Task 11.7) ──────────────────
+//
+// The two review stages run CONCURRENTLY (`runAgent` awaits them together via
+// Promise.all, so each begins before the other completes — Req 20.2). Each runs
+// under the shared `runStage` engine with its own single-tool allow-list and a
+// stage-specific prompt:
+//   • Medical_Review — scoped to `fetchPatientRecord` (Req 3.8); assesses
+//     clinical medical necessity from the patient's Chart_Notes and writes a
+//     `stepType: "medical_review"` Trace_Step (Req 20.7).
+//   • Policy_Review — scoped to `fetchPayerPolicy` (Req 3.9); assesses the
+//     payer's medical-necessity criteria for the procedure and writes a
+//     `stepType: "policy_review"` Trace_Step (Req 20.8).
+// Each produces a compact assessment summary carried on `StageSummary.note`,
+// consumed downstream by Decision_Intelligence (Req 5.2 / Task 11.13).
+
+/** The Case context each review stage reads to drive its scoped tool call. */
+interface ReviewContext {
+  patientId: string | null;
+  payerId: string | null;
+  payerName: string | null;
+  procedureCode: string | null;
+  diagnosisCode: string | null;
+  denialReason: string | null;
 }
 
-/** SEAM — Task 11.7 fills the policy-only Policy_Review body (scoped to fetchPayerPolicy). */
-function policyReviewStage(ctx: StageContext): Promise<StageSummary> {
-  return runStageSeam(ctx, "Policy_Review", "11.7");
+/** What a review stage's `finalize` hands back: the model's assessment + transcript. */
+interface ReviewStageData {
+  assessment: string;
+  observations: ToolObservation[];
+}
+
+/** Read a resolved Extracted_Field value for `fieldName`, or null when unusable. */
+function usableFieldValue(
+  fields: { fieldName: string; value: string }[],
+  fieldName: string,
+): string | null {
+  const row = fields.find((f) => f.fieldName === fieldName);
+  if (!row || isUnknownValue(row.value)) return null;
+  return row.value.trim();
+}
+
+/**
+ * Load the Case linkage + the intake Extracted_Fields the review stages reason
+ * over: the linked patientId (Req 2.5) and payer reference (Req 2.7) drive the
+ * scoped tool calls, and the procedure/diagnosis/denial fields give the model
+ * the clinical/policy context to assess.
+ */
+async function loadReviewContext(caseId: string): Promise<ReviewContext> {
+  const kase = await prisma.case.findUnique({
+    where: { id: caseId },
+    select: { patientId: true, payerId: true, payerName: true },
+  });
+  if (!kase) {
+    throw new Error(`Review stage: Case "${caseId}" not found.`);
+  }
+
+  const fields = await prisma.extractedField.findMany({
+    where: { caseId },
+    select: { fieldName: true, value: true },
+  });
+
+  return {
+    patientId: kase.patientId,
+    payerId: kase.payerId,
+    payerName: kase.payerName,
+    procedureCode: usableFieldValue(fields, INTAKE_FIELD_NAMES.procedureCode),
+    diagnosisCode: usableFieldValue(fields, INTAKE_FIELD_NAMES.diagnosisCode),
+    denialReason: usableFieldValue(fields, INTAKE_FIELD_NAMES.denialReason),
+  };
+}
+
+/** Collapse the model's final content into a compact one-paragraph assessment. */
+function normalizeAssessment(content: string | null, fallback: string): string {
+  if (typeof content !== "string" || content.trim() === "") return fallback;
+  return content.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Run a review stage through `runStage` and map its `StageOutcome<ReviewStageData>`
+ * onto a `StageOutcome<StageSummary>`: propagate degrade/exhaust unchanged, and
+ * on completion write the single stage-labeled Trace_Step (Req 20.5) whose
+ * reasoning is the assessment summary consumed downstream, then return it as the
+ * stage summary's `note`.
+ */
+async function runReviewStage(
+  ctx: StageContext,
+  stage: "Medical_Review" | "Policy_Review",
+  plan: StagePlan<ReviewStageData>,
+): Promise<StageOutcome<StageSummary>> {
+  const outcome = await runStage<ReviewStageData>(ctx.caseId, plan);
+
+  if (outcome.status === "degraded") {
+    return {
+      status: "degraded",
+      failure: outcome.failure,
+      iterations: outcome.iterations,
+    };
+  }
+  if (outcome.status === "exhausted") {
+    return {
+      status: "exhausted",
+      observations: outcome.observations,
+      iterations: outcome.iterations,
+    };
+  }
+
+  const { assessment, observations } = outcome.summary;
+  const note = `[${stage}] ${assessment}`;
+
+  // Req 20.5 / 20.7 / 20.8 — the stage's labeled Trace_Step (medical_review /
+  // policy_review), carrying the assessment summary consumed by Decision.
+  await createTraceStep({
+    caseId: ctx.caseId,
+    stepType: STAGE_STEP_TYPE[stage],
+    reasoning: note,
+    output: {
+      assessment,
+      toolCalls: observations.map((obs) => ({
+        tool: obs.tool,
+        ok: obs.ok,
+      })),
+    },
+  });
+
+  return {
+    status: "completed",
+    summary: { stage, note },
+    iterations: outcome.iterations,
+  };
+}
+
+const MEDICAL_REVIEW_SYSTEM_PROMPT = [
+  "You are the Medical_Review stage of the AuthPilot prior-authorization agent.",
+  "Your job is to assess the CLINICAL medical necessity of the requested procedure using ONLY",
+  "the patient's chart. You may call fetchPatientRecord(patientId) to read the patient record and",
+  "its chart notes — this is your only tool. Do not speculate about payer policy; that is a",
+  "separate stage.",
+  "",
+  "Read the chart notes for documented symptoms, diagnoses, prior conservative treatment, and any",
+  "evidence that supports or undermines clinical medical necessity for the procedure. Then reply",
+  "with a concise plain-text assessment (a short paragraph, no code fence, no JSON) stating whether",
+  "the chart supports medical necessity, the key supporting or missing clinical evidence, and any",
+  "gaps a reviewer should know about. If the patient chart is unavailable, say so and describe what",
+  "could not be assessed.",
+].join("\n");
+
+const POLICY_REVIEW_SYSTEM_PROMPT = [
+  "You are the Policy_Review stage of the AuthPilot prior-authorization agent.",
+  "Your job is to assess the PAYER's medical-necessity criteria for the requested procedure using",
+  "ONLY the payer policy. You may call fetchPayerPolicy(payerId, procedureCode) to read the payer's",
+  "medical-necessity policy — this is your only tool. Do not assess the patient chart; that is a",
+  "separate stage.",
+  "",
+  "Read the policy criteria and identify which criteria apply to this procedure, what the payer",
+  "requires to approve it, and how the stated denial reason relates to those criteria. Then reply",
+  "with a concise plain-text assessment (a short paragraph, no code fence, no JSON) summarizing the",
+  "applicable payer criteria and what must be satisfied. If no matching policy is found, say so and",
+  "describe what could not be assessed.",
+].join("\n");
+
+/** Build the Medical_Review user prompt from the resolved Case context. */
+function buildMedicalReviewUserPrompt(rc: ReviewContext): string {
+  const lines: string[] = [];
+  if (rc.patientId) {
+    lines.push(
+      `Linked patientId: ${rc.patientId}. Call fetchPatientRecord with this id to read the chart.`,
+    );
+  } else {
+    lines.push(
+      "No patient is linked to this Case (the intake patient did not resolve to a known record).",
+      "You cannot fetch a chart; assess what you can and note the missing linkage as a gap.",
+    );
+  }
+  lines.push(
+    `Requested procedure code: ${rc.procedureCode ?? "unknown"}.`,
+    `Diagnosis code: ${rc.diagnosisCode ?? "unknown"}.`,
+    `Stated denial reason: ${rc.denialReason ?? "unknown"}.`,
+    "",
+    "Assess clinical medical necessity from the chart and return your concise assessment.",
+  );
+  return lines.join("\n");
+}
+
+/** Build the Policy_Review user prompt from the resolved Case context. */
+function buildPolicyReviewUserPrompt(rc: ReviewContext): string {
+  const lines: string[] = [];
+  if (rc.payerId && rc.procedureCode) {
+    lines.push(
+      `Payer: ${rc.payerName ?? rc.payerId} (payerId: ${rc.payerId}).`,
+      `Call fetchPayerPolicy with payerId "${rc.payerId}" and procedureCode "${rc.procedureCode}" to read the policy.`,
+    );
+  } else {
+    const missing: string[] = [];
+    if (!rc.payerId) missing.push("payer");
+    if (!rc.procedureCode) missing.push("procedure code");
+    lines.push(
+      `The ${missing.join(" and ")} could not be resolved for this Case, so the payer policy cannot be fetched.`,
+      "Assess what you can and note the missing input as a gap.",
+    );
+  }
+  lines.push(
+    `Requested procedure code: ${rc.procedureCode ?? "unknown"}.`,
+    `Stated denial reason: ${rc.denialReason ?? "unknown"}.`,
+    "",
+    "Assess the payer medical-necessity criteria and return your concise assessment.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Medical_Review stage body (Task 11.7) — scoped to `fetchPatientRecord`
+ * (Req 3.8); assesses clinical medical necessity from the Chart_Notes and
+ * emits a `medical_review` Trace_Step whose reasoning is the summary consumed
+ * downstream (Req 20.7).
+ */
+async function medicalReviewStage(
+  ctx: StageContext,
+): Promise<StageOutcome<StageSummary>> {
+  const stage = "Medical_Review" as const;
+  const rc = await loadReviewContext(ctx.caseId);
+
+  const plan: StagePlan<ReviewStageData> = {
+    stage,
+    systemPrompt: MEDICAL_REVIEW_SYSTEM_PROMPT,
+    userPrompt: buildMedicalReviewUserPrompt(rc),
+    finalize: ({ content, observations }) => ({
+      assessment: normalizeAssessment(
+        content,
+        "No clinical assessment was produced; the patient chart could not be evaluated.",
+      ),
+      observations,
+    }),
+  };
+
+  return runReviewStage(ctx, stage, plan);
+}
+
+/**
+ * Policy_Review stage body (Task 11.7) — scoped to `fetchPayerPolicy`
+ * (Req 3.9); assesses the payer medical-necessity criteria for the procedure
+ * and emits a `policy_review` Trace_Step whose reasoning is the summary consumed
+ * downstream (Req 20.8).
+ */
+async function policyReviewStage(
+  ctx: StageContext,
+): Promise<StageOutcome<StageSummary>> {
+  const stage = "Policy_Review" as const;
+  const rc = await loadReviewContext(ctx.caseId);
+
+  const plan: StagePlan<ReviewStageData> = {
+    stage,
+    systemPrompt: POLICY_REVIEW_SYSTEM_PROMPT,
+    userPrompt: buildPolicyReviewUserPrompt(rc),
+    finalize: ({ content, observations }) => ({
+      assessment: normalizeAssessment(
+        content,
+        "No policy assessment was produced; the payer policy could not be evaluated.",
+      ),
+      observations,
+    }),
+  };
+
+  return runReviewStage(ctx, stage, plan);
 }
 
 /** SEAM — Task 11.9 fills win-probability strategy options over prior-auth history. */

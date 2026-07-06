@@ -223,7 +223,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 38: Unresolved intake fields are traced without terminating**
     - **Validates: Requirements 20.4**
 
-  - [~] 11.7 Implement the parallel Medical_Review and Policy_Review stages
+  - [x] 11.7 Implement the parallel Medical_Review and Policy_Review stages
     - Run `Promise.all([runStage(..., "Medical_Review"), runStage(..., "Policy_Review")])` so each begins before the other completes; Medical_Review is scoped to `fetchPatientRecord` and writes `stepType: "medical_review"`, Policy_Review is scoped to `fetchPayerPolicy` and writes `stepType: "policy_review"`; each produces a summary consumed downstream
     - _Requirements: 20.2, 20.7, 20.8_
 
@@ -449,7 +449,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert that when persisting the status change, `resolvedAt`, or the Trace_Step fails, all three effects roll back (Case retains `AppealSent` and its prior `resolvedAt`, no partial Trace_Step) and a message indicating the outcome was not recorded is returned
     - **Validates: Requirements 24.5**
 
-  - [~] 15.10 Implement the shared case action in `lib/caseActions.ts`
+  - [x] 15.10 Implement the shared case action in `lib/caseActions.ts`
     - Implement `performCaseAction(caseId, actionType, meta)` as the single shared implementation of approve/reject/edit/request_more_evidence invoked by **both** the Dashboard action route (task 15.1) and the WhatsApp staff-command handler (task 26.11), differing only in `meta.source` (`"dashboard"` | `"whatsapp"`); make it the **sole writer** of the `human_action` Trace_Step for these four transitions, recording `meta.source` as the channel source; return a structured `CaseActionResult` (`success`, `newStatus`, `message`, optional `pdfUrl`) and **never throw** — wrap the whole body so any persistence/tool error becomes `{ success: false, newStatus: <unchanged>, message }`
     - approve → generate the `Appeal_Packet` via `generateAppealPdf` if none exists, set `AppealSent`, invoke the simulated Submission_And_Tracking step, and return the appeal location as `pdfUrl`; reject → set `NeedsHumanInput` and send a staff manual-review notification on the WhatsApp_Channel; edit → dashboard-only apply to the Case `recommendation` without a status change, and when `meta.source === "whatsapp"` refuse with a message leaving `recommendation`/`Case_Status` unchanged; request_more_evidence → append the evidence as an `Extracted_Field` with `sourceType: "human_provided"`, set `Investigating`, and re-invoke the `Agent_Runner` pipeline as a fire-and-forget re-run (consistent with Requirement 16)
     - Apply every `Case_Status` change through `assertTransition` (`lib/caseStatus.ts`) and wrap it in `withIdempotency(meta.idempotencyKey, …)` (`lib/idempotency.ts`) so a legal transition takes effect at most once across retries/redeliveries
@@ -495,8 +495,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert card fields, confidence badge, SLA countdown, at-risk indicator, and card/New-Case navigation
     - _Requirements: 10.2, 10.3, 10.5, 12.4_
 
-- [ ] 20. Implement the Case Detail page
-  - [~] 20.1 Build `app/case/[id]/page.tsx` facts panel, live trace, and action zone
+- [x] 20. Implement the Case Detail page
+  - [x] 20.1 Build `app/case/[id]/page.tsx` facts panel, live trace, and action zone
     - `CaseFactsPanel` (extracted fields with confidence chips and expandable source tags); `LiveTracePanel` polling `/trace` every 1s while Investigating with Framer Motion entrance, labeling each trace line with a stage icon/label derived from its `stepType` (🩺 medical_review, 📚 policy_review, 🎯 strategy, ✅ verification, 🤖 decision, plus the tool name for tool_call steps); `HumanActionZone` (recommendation + Approve/Edit/Request More Evidence/Reject + appeal PDF preview/download + plain-English explanation) wired to `/action`, displaying each flagged issue alongside the recommendation when the stored `verificationResult.status` is `fail`
     - In `HumanActionZone`, when the Case status is `AppealSent`, show the two Case_Outcome controls **Appeal Won** and **Appeal Denied** (which POST `appeal_won`/`appeal_denied` to `/action`); show these controls only for `AppealSent` cases and hide them in every other status
     - _Requirements: 7.5, 8.1, 11.1, 11.2, 11.4, 11.5, 13.1, 13.2, 13.3, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6, 24.1_
@@ -506,8 +506,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert the Appeal Won / Appeal Denied controls render only when the Case status is `AppealSent` and are hidden in every other status (24.1)
     - _Requirements: 11.1, 11.2, 11.4, 11.5, 13.2, 13.4, 15.2, 20.7, 20.8, 20.9, 20.10, 22.6, 24.1_
 
-- [ ] 21. Implement the Audit and Analytics pages
-  - [~] 21.1 Build `app/case/[id]/audit/page.tsx` and `app/analytics/page.tsx`
+- [x] 21. Implement the Audit and Analytics pages
+  - [x] 21.1 Build `app/case/[id]/audit/page.tsx` and `app/analytics/page.tsx`
     - Audit: merged chronological timeline of fields + trace steps with "Download as PDF"; Analytics: denials-by-payer bar chart, resolution rate, average time-to-resolution, at-risk list (Recharts)
     - _Requirements: 9.3, 9.4, 14.1, 14.2, 14.3, 14.4_
 
