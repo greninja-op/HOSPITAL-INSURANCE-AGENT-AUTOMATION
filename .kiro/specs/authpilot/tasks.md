@@ -212,7 +212,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 42: Stage-scoped tool access**
     - **Validates: Requirements 3.8, 3.9**
 
-  - [~] 11.5 Implement the Intake_And_Extraction stage
+  - [x] 11.5 Implement the Intake_And_Extraction stage
     - In a single Qwen call, resolve the patient, payer, procedure code, diagnosis code, and denial reason as Extracted_Fields (merging the former document + entity steps into one call); for any of the five that cannot be resolved, record a Trace_Step naming each unresolved field and continue the pipeline without terminating the Case
     - When the extracted patient matches a known `Patient` record, set `Case.patientId` to that record's id; when it does not match, leave `Case.patientId` unset and record the patient as an unresolved field
     - When the extracted payer resolves to a known `Payer`, set the Case payer reference (`Case.payerId` and `Case.payerName`) to that Payer; when it does not resolve, leave both unset and record the payer as an unresolved field
@@ -338,8 +338,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [~] 12. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 13. Implement intake and case creation API
-  - [~] 13.1 Implement `POST /api/cases` with zod validation and async kickoff
+- [x] 13. Implement intake and case creation API
+  - [x] 13.1 Implement `POST /api/cases` with zod validation and async kickoff
     - Validate intake (reject empty/whitespace text with no file and missing/invalid intake type with a field-identifying 400); accept an optional `urgent` boolean that defaults to `false` when omitted; on PDF upload extract text via pdf-lib and store as raw intake; create Case status New, setting `Case.isUrgent` from the `urgent` flag and computing `slaDeadline` via `slaDeadline(createdAt, urgent)`; kick off `runAgent` async and return the caseId immediately
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.7, 1.8, 1.9, 12.1_
 
@@ -477,8 +477,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert sidebar links render on every page and the status indicator toggles between running-case and Idle
     - _Requirements: 19.1, 19.3, 19.4_
 
-- [ ] 18. Implement the Intake page
-  - [~] 18.1 Build `app/intake/page.tsx` with `IntakeForm`
+- [x] 18. Implement the Intake page
+  - [x] 18.1 Build `app/intake/page.tsx` with `IntakeForm`
     - Textarea + file upload + intake-type select + an urgent toggle that defaults to off (drives `Case.isUrgent` and the SLA deadline); POST `/api/cases`; redirect to the Case Detail page on the returned caseId
     - _Requirements: 1.6, 1.7, 10.4_
 
@@ -486,8 +486,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert successful submission redirects to `/case/[id]`
     - _Requirements: 1.6_
 
-- [ ] 19. Implement the Dashboard page
-  - [~] 19.1 Build `app/page.tsx` Kanban board, case cards, and denials widget
+- [x] 19. Implement the Dashboard page
+  - [x] 19.1 Build `app/page.tsx` Kanban board, case cards, and denials widget
     - `KanbanBoard` with a column per Case_Status; `CaseCard` shows patient initials, payer, procedure, confidence badge, `SlaCountdownRing`, and at-risk indicator; `DenialsByPayerWidget` (Recharts) for the current month; card click opens Case Detail; New Case control opens Intake
     - _Requirements: 10.1, 10.2, 10.3, 10.5, 12.2, 12.4_
 
