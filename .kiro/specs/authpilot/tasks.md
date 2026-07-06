@@ -45,7 +45,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - _Requirements: 39.1, 39.2_
 
 - [ ] 3. Implement the Decision_Engine (pure logic)
-  - [ ] 3.1 Implement `decide()` in `lib/decisionEngine.ts`
+  - [x] 3.1 Implement `decide()` in `lib/decisionEngine.ts`
     - Evaluate rules in order: iterations-exhausted OR contradictionCount > 0 → Escalate_To_Human (NeedsHumanInput); confidence > 85 → Auto_Draft (AwaitingApproval); 60 ≤ confidence ≤ 85 → Draft_And_Request_Evidence (AwaitingApproval); confidence < 60 → Escalate_To_Human (NeedsHumanInput)
     - Return `{ path, status }` with status derived from path
     - Treat the `contradictionCount` input as the number of blocking Findings supplied by the caller (see `lib/findings.ts`), so escalation-by-findings depends only on blocking findings
@@ -64,8 +64,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 15: Overall confidence stays in range**
     - **Validates: Requirements 5.1**
 
-- [ ] 4. Implement the SLA_Clock (pure logic)
-  - [ ] 4.1 Implement `slaDeadline()`, `remainingMs()`, and `isAtRisk()` in `lib/sla.ts`
+- [x] 4. Implement the SLA_Clock (pure logic)
+  - [x] 4.1 Implement `slaDeadline()`, `remainingMs()`, and `isAtRisk()` in `lib/sla.ts`
     - `slaDeadline`: +7 days standard, +72 hours urgent; `remainingMs`: deadline minus now (may be negative); `isAtRisk`: remaining < 24h including overdue
     - _Requirements: 12.1, 12.2, 12.3_
 
@@ -81,8 +81,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [ ] 5. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 6. Implement the Qwen_Client
-  - [ ] 6.1 Implement resilient `callQwen()` in `lib/qwen.ts`
+- [x] 6. Implement the Qwen_Client
+  - [x] 6.1 Implement resilient `callQwen()` in `lib/qwen.ts`
     - Typed wrapper over the DashScope/OpenRouter chat-completions endpoint with `tools` (function-calling) support; parse `toolCalls`/`content`; read `QWEN_API_KEY`/`QWEN_API_BASE` and a per-attempt timeout (`QWEN_ATTEMPT_TIMEOUT_MS`)
     - Wrap each attempt in a bounded per-attempt timeout; retry only transient failures (network error, per-attempt timeout, or HTTP 429/500/502/503/504) using exponential backoff up to the 3-attempt total (original + 2); on a permanent failure (HTTP 4xx other than 429, or a malformed/empty response) stop immediately without a further retry
     - Add the pure, table-driven `classifyQwenFailure(err)` classifier mapping an error shape (`{ status?, timedOut?, body? }`) to `{ kind, transient }`, and use it inside `callQwen`
@@ -136,8 +136,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 10: Trace step completeness**
     - **Validates: Requirements 9.2**
 
-- [ ] 8. Implement the appeal PDF generator
-  - [ ] 8.1 Implement `generateAppealPdf()` in `lib/appealPdf.ts`
+- [x] 8. Implement the appeal PDF generator
+  - [x] 8.1 Implement `generateAppealPdf()` in `lib/appealPdf.ts`
     - Use pdf-lib to render an appeal citing the denial reason, referenced Payer_Policy clause, and supporting Chart_Note evidence; persist the file and return `{ url }`
     - _Requirements: 7.3, 7.4_
 
