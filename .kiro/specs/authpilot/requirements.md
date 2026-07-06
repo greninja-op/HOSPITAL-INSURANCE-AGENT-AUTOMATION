@@ -50,6 +50,13 @@ This document defines the requirements for the full application: a Next.js 14 (A
 - **Finding_Severity**: The severity of a Finding, one of "warning" or "blocking".
 - **Status_Transition**: An ordered pair of Case_Status values (from-status, to-status) representing a requested change to a Case Case_Status, evaluated against the allowed-transition set.
 - **Gold_Case**: A stored evaluation case with a fixed Intake and expected outcomes — the expected Resolution_Path and the expected triggering Finding identifier(s) — used to detect decision-logic regressions.
+- **WhatsApp_Channel**: AuthPilot's messaging channel through which patients submit intakes and receive generic status updates, and through which registered staff members receive notifications and issue actions, carrying only triggers, generic (PHI-free) status, and staff approvals.
+- **WhatsApp_Message**: A single inbound or outbound message on the WhatsApp_Channel, recorded with its direction, sender, role, content, message type, timestamp, and linked Case where applicable.
+- **Staff_Number**: A phone number registered with AuthPilot as belonging to an authorized staff member, used to authorize staff actions and address staff notifications on the WhatsApp_Channel.
+- **Patient_Template**: A pre-approved, generic, PHI-free message template used for all outbound patient-facing messages on the WhatsApp_Channel.
+- **Voice_Transcript**: The text transcript of a phone call submitted to AuthPilot as the source of a "phone_note" Intake, without any real-time media or telephony processing.
+- **App_Configuration**: The set of configuration keys required to run AuthPilot, including the datasource provider and connection URL and the WhatsApp_Channel keys, validated at startup.
+- **PHI**: Protected health information — patient-identifying or case-specific medical detail that remains within the AuthPilot application and generated PDFs and is never carried on the WhatsApp_Channel.
 
 ## Requirements
 
@@ -59,7 +66,7 @@ This document defines the requirements for the full application: a Next.js 14 (A
 
 #### Acceptance Criteria
 
-1. WHEN an Operator submits Intake text with a selected intake type of "denial_letter", "new_pa_request", or "phone_note", THE AuthPilot SHALL create a new Case with status "New" and store the raw Intake text.
+1. WHEN an Operator submits Intake text with a selected intake type of "denial_letter", "new_pa_request", "phone_note", or "whatsapp_patient_note", THE AuthPilot SHALL create a new Case with status "New" and store the raw Intake text.
 2. WHEN an Operator uploads a PDF denial letter, THE AuthPilot SHALL extract the text content from the PDF and store it as the Case raw Intake text.
 3. IF an Operator submits an Intake with empty text and no uploaded file, THEN THE AuthPilot SHALL reject the submission and return a validation message identifying the missing intake content.
 4. IF an Operator submits an Intake without selecting an intake type, THEN THE AuthPilot SHALL reject the submission and return a validation message identifying the missing intake type.
@@ -68,6 +75,8 @@ This document defines the requirements for the full application: a Next.js 14 (A
 7. THE AuthPilot SHALL provide, on the Intake page and on the create-Case API endpoint, an urgent flag that defaults to not urgent.
 8. WHEN an Operator submits an Intake with the urgent flag set, THE AuthPilot SHALL set Case.isUrgent to true and set the SLA_Clock deadline to 72 hours from Case creation.
 9. WHEN an Operator submits an Intake with the urgent flag not set, THE AuthPilot SHALL set Case.isUrgent to false and set the SLA_Clock deadline to 7 days from Case creation.
+10. WHERE an Intake originates from the WhatsApp_Channel, THE AuthPilot SHALL create the Case with intake type "whatsapp_patient_note" and store the inbound WhatsApp text (or the text extracted from an inbound WhatsApp document) as the raw Intake text.
+11. WHEN inbound WhatsApp text or extracted WhatsApp document content is to be incorporated into any prompt to the Qwen_Client, THE AuthPilot SHALL first screen that content with the Safety_Guard consistent with Requirement 27 before the content enters any prompt.
 
 ### Requirement 2: Entity Resolution
 
@@ -168,6 +177,8 @@ This document defines the requirements for the full application: a Next.js 14 (A
 5. WHEN an Operator selects Request More Evidence and submits additional information, THE AuthPilot SHALL append the additional information to the Case context, re-invoke the Agent_Runner, and record a Trace_Step of type "human_action".
 6. WHILE no Human_Action has been recorded for a Case recommendation, THE AuthPilot SHALL NOT mark any outbound action as sent.
 7. WHEN an outbound action is approved, THE AuthPilot SHALL simulate sending the action rather than transmitting to any external system.
+8. WHERE a Human_Action is initiated via the WhatsApp_Channel by a registered Staff_Number, THE AuthPilot SHALL record the resulting "human_action" Trace_Step with a channel source of "whatsapp".
+9. WHEN a Human_Action initiated via the WhatsApp_Channel changes the Case_Status, THE AuthPilot SHALL apply the change through the Case Status state machine defined in Requirement 28 and SHALL apply the change idempotently consistent with Requirement 26.
 
 ### Requirement 9: Full Audit Trail
 
@@ -445,3 +456,106 @@ The allowed Status_Transitions are defined by the following table. Any (from-sta
 2. WHEN the Gold_Case evaluation operation runs, THE AuthPilot SHALL execute each Gold_Case and compare the produced Resolution_Path and triggering Finding identifier(s) against the expected values for that Gold_Case.
 3. WHEN the Gold_Case evaluation operation completes, THE AuthPilot SHALL report a per-case pass or fail result, where a Gold_Case passes only when the produced Resolution_Path and the produced triggering Finding identifier(s) match the expected values.
 4. IF a Gold_Case produces a Resolution_Path or a triggering Finding identifier that differs from its expected values, THEN THE AuthPilot SHALL report that Gold_Case as failed.
+
+### Requirement 31: WhatsApp Webhook Ingress and Verification
+
+**User Story:** As an operator, I want the WhatsApp channel endpoint to verify and authenticate every inbound request, so that only genuine, unaltered messages are processed and each is processed once.
+
+#### Acceptance Criteria
+
+1. WHEN the WhatsApp_Channel endpoint receives a GET verification request, THE AuthPilot SHALL complete the verification handshake by comparing the presented verify token against the configured verify token and returning the presented challenge value only when the tokens match.
+2. IF the presented verify token does not match the configured verify token, THEN THE AuthPilot SHALL reject the GET verification request without completing the handshake.
+3. WHERE a WhatsApp app secret is configured, WHEN the WhatsApp_Channel endpoint receives a POST inbound request, THE AuthPilot SHALL verify the request by computing an X-Hub-Signature-256 HMAC over the exact raw request body using the app secret and comparing the computed signature against the presented signature using a constant-time comparison.
+4. IF the computed signature does not match the presented signature WHERE a WhatsApp app secret is configured, THEN THE AuthPilot SHALL reject the POST inbound request without processing its content.
+5. WHEN the WhatsApp_Channel endpoint accepts a verified POST inbound request, THE AuthPilot SHALL acknowledge receipt promptly and process the message asynchronously.
+6. WHEN the WhatsApp_Channel processes inbound messages, THE AuthPilot SHALL deduplicate messages by inbound message identifier so that each inbound message identifier is processed at most once, consistent with the idempotency guarantees of Requirement 26.
+7. WHEN the WhatsApp_Channel processes a webhook-originated message, THE AuthPilot SHALL write the resulting audit events to the same Audit_Chain defined in Requirement 25 that the in-app flow uses.
+
+### Requirement 32: WhatsApp Patient Intake
+
+**User Story:** As a patient, I want to send my insurance problem or a photo of my denial letter over WhatsApp, so that AuthPilot starts working my case and I get an acknowledgement.
+
+#### Acceptance Criteria
+
+1. WHEN a patient sends free-text over the WhatsApp_Channel, THE AuthPilot SHALL create a Case with intake type "whatsapp_patient_note", store the message text as the raw Intake, and run the normal agent pipeline.
+2. WHEN a patient sends a denial-letter image over the WhatsApp_Channel, THE AuthPilot SHALL extract the text from the image, store the extracted text as the raw Intake, create a Case with intake type "whatsapp_patient_note", and run the normal agent pipeline.
+3. WHEN a Case is created from a patient WhatsApp message, THE AuthPilot SHALL reply on the WhatsApp_Channel with a generic pre-approved acknowledgement Patient_Template.
+4. WHEN a patient asks for status over the WhatsApp_Channel, THE AuthPilot SHALL look up the patient's most recent open Case by phone number and reply with a generic PHI-free status Patient_Template without re-running the agent pipeline.
+5. IF a patient asks for status over the WhatsApp_Channel and no open Case exists for that phone number, THEN THE AuthPilot SHALL reply with a generic "no open case" Patient_Template.
+
+### Requirement 33: WhatsApp Patient Outbound Messaging
+
+**User Story:** As a compliance-conscious operator, I want every patient-facing WhatsApp message to be a generic pre-approved template with no PHI, so that protected health information never leaves the app over the channel.
+
+#### Acceptance Criteria
+
+1. THE AuthPilot SHALL define four generic Patient_Template triggers for outbound patient messages: case created, needs-more-info, appeal filed, and resolved.
+2. WHEN the needs-more-info Patient_Template is sent, THE AuthPilot SHALL send a generic message that does not state which information or document is missing.
+3. THE AuthPilot SHALL restrict every patient-facing WhatsApp_Message to content that contains no PHI and no case-specific medical detail.
+4. THE AuthPilot SHALL send every outbound patient WhatsApp_Message using a pre-approved Patient_Template.
+5. WHILE the 24-hour session window for a patient conversation is open, THE AuthPilot SHALL deliver outbound patient messages within that session window.
+6. IF an outbound patient WhatsApp_Message cannot be delivered within the 24-hour session window, THEN THE AuthPilot SHALL re-attempt delivery using an approved Patient_Template at most one additional time and SHALL NOT enter an automatic resend loop.
+
+### Requirement 34: WhatsApp Staff Actions
+
+**User Story:** As a staff member, I want to approve, reject, and query cases from WhatsApp, so that I can act on cases from anywhere with the same effect as the dashboard.
+
+#### Acceptance Criteria
+
+1. WHILE a registered Staff_Number messages the WhatsApp_Channel, THE AuthPilot SHALL parse the commands Approve <case-id>, Reject <case-id>, Status <case-id | patient name>, and Show <case-id>.
+2. WHEN a registered Staff_Number sends Approve <case-id>, THE AuthPilot SHALL perform the same effect as the in-app Approve action by transitioning the Case to "AppealSent", generating and sending the Appeal_Packet, and recording a "human_action" Trace_Step with source "whatsapp".
+3. WHEN a registered Staff_Number sends Reject <case-id>, THE AuthPilot SHALL transition the Case to "NeedsHumanInput" and record the rejection reason.
+4. WHEN a registered Staff_Number sends Status <case-id | patient name>, THE AuthPilot SHALL reply with a one-line summary containing the Case_Status, the overall Confidence_Score, and the SLA days remaining.
+5. WHEN a registered Staff_Number sends Show <case-id>, THE AuthPilot SHALL reply with a link to the Case Detail page for that Case.
+6. WHEN a staff action from the WhatsApp_Channel changes the Case_Status, THE AuthPilot SHALL apply the change through the Case Status state machine defined in Requirement 28 and SHALL apply the change idempotently consistent with Requirement 26.
+7. IF a WhatsApp_Channel action command is sent by a sender that is not a registered Staff_Number, THEN THE AuthPilot SHALL reject the action without changing the Case.
+
+### Requirement 35: WhatsApp Staff Notifications
+
+**User Story:** As a staff member, I want AuthPilot to notify me on WhatsApp about the cases that need my attention, so that I can respond promptly from anywhere.
+
+#### Acceptance Criteria
+
+1. WHEN a Case is created from a patient WhatsApp message, THE AuthPilot SHALL send a staff notification WhatsApp_Message to the registered Staff_Number indicating a new Case was created.
+2. WHEN a Case reaches status "AwaitingApproval", THE AuthPilot SHALL send a staff notification WhatsApp_Message indicating the recommendation is ready, containing a one-line Decision_Intelligence summary and the overall Confidence_Score.
+3. WHEN a Case SLA_Clock deadline is approaching, THE AuthPilot SHALL send a staff notification WhatsApp_Message indicating the approaching deadline.
+4. WHEN the Verification_QA stage flags an issue requiring manual review for a Case, THE AuthPilot SHALL send a staff notification WhatsApp_Message indicating that the Case requires manual review.
+
+### Requirement 36: WhatsApp Channel Audit and Data
+
+**User Story:** As a compliance-conscious operator, I want every WhatsApp message and every channel-originated action recorded in the same audit trail as the in-app flow, so that the audit trail has no channel-shaped gap.
+
+#### Acceptance Criteria
+
+1. WHEN AuthPilot sends or receives a WhatsApp_Message, THE AuthPilot SHALL record the message with its direction, sender, role, content, message type, timestamp, and linked Case where applicable.
+2. WHEN a WhatsApp-originated domain action occurs, THE AuthPilot SHALL write the same Trace_Step and Audit_Chain entries defined in Requirement 25 that the equivalent in-app action writes.
+3. THE AuthPilot SHALL keep PHI and case-specific detail within the AuthPilot application and generated PDFs, and SHALL carry only triggers, generic PHI-free status, and staff approvals over the WhatsApp_Channel.
+
+### Requirement 37: Voice Transcript Intake
+
+**User Story:** As a front-office staff member, I want to submit a phone call transcript, so that AuthPilot works the case the same way it works any other intake.
+
+#### Acceptance Criteria
+
+1. WHEN a Voice_Transcript is submitted, THE AuthPilot SHALL create an Intake of type "phone_note" from the Voice_Transcript and run the normal agent pipeline as it does for any other Intake.
+2. THE AuthPilot SHALL treat the Voice_Transcript intake as a transcript path only and SHALL NOT require any real-time media or telephony processing.
+
+### Requirement 38: Configuration Validation
+
+**User Story:** As an operator, I want AuthPilot to validate its configuration at startup and fail fast on problems, so that misconfiguration is caught immediately and secrets are never exposed.
+
+#### Acceptance Criteria
+
+1. WHEN AuthPilot starts, THE AuthPilot SHALL validate the required App_Configuration keys.
+2. IF a required App_Configuration key is missing or invalid at startup, THEN THE AuthPilot SHALL fail fast and return a message identifying each missing or invalid key.
+3. WHEN AuthPilot validates the WhatsApp_Channel keys, THE AuthPilot SHALL treat the four WhatsApp keys as an all-or-nothing group, enabling the WhatsApp_Channel only when all four keys are present and disabling the WhatsApp_Channel otherwise.
+4. WHEN AuthPilot logs or summarizes App_Configuration, THE AuthPilot SHALL report only the presence of each secret value and SHALL NOT log any secret value.
+
+### Requirement 39: Data Store Portability
+
+**User Story:** As an operator, I want to run AuthPilot on SQLite by default and switch to PostgreSQL with a single configuration change, so that I can deploy on either data store without code changes.
+
+#### Acceptance Criteria
+
+1. THE AuthPilot SHALL run on SQLite by default.
+2. WHERE the App_Configuration datasource provider and connection URL are set to PostgreSQL, THE AuthPilot SHALL run on PostgreSQL through that single configuration change without any change to application logic.
