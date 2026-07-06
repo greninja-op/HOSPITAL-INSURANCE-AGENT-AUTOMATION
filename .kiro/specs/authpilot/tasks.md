@@ -27,7 +27,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Add a test helper that spins up an in-memory/temporary SQLite instance for tests
     - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3, 25.1, 25.3, 26.2, 31.6, 32.4, 36.1, 40.9, 43.1_
 
-  - [ ] 2.2 Implement the stepType validation guard
+  - [-] 2.2 Implement the stepType validation guard
     - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
     - _Requirements: 23.3, 23.6_
 
@@ -56,7 +56,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9**
     - Use the decision-input generator with emphasis on the 60 and 85 boundaries
 
-  - [ ] 3.3 Implement `computeOverallConfidence()` in `lib/decisionEngine.ts`
+  - [-] 3.3 Implement `computeOverallConfidence()` in `lib/decisionEngine.ts`
     - Aggregate extracted-field confidences into an overall score clamped to [0, 100]
     - _Requirements: 5.1_
 
@@ -100,7 +100,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Drive `classifyQwenFailure` and `callQwen` with generated failure sequences; assert transient runs make at most 3 attempts with exponential backoff and permanent failures return a structured `QwenFailure` on the first-failure attempt with no further retry
 
 - [ ] 7. Implement the Agent_Tools
-  - [ ] 7.1 Implement Prisma-backed tools in `lib/agentTools.ts`
+  - [-] 7.1 Implement Prisma-backed tools in `lib/agentTools.ts`
     - `fetchPatientRecord(patientId)` → patient + associated chart notes; `fetchPayerPolicy(payerId, procedureCode)` → matching policy or null; `checkPriorAuthHistory(patientId)` → that patient's cases
     - _Requirements: 3.1, 3.2, 3.4_
 
@@ -591,7 +591,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 38.4**
 
 - [ ] 26. Implement the WhatsApp channel
-  - [ ] 26.1 Implement request-signature verification in `lib/whatsapp/signature.ts`
+  - [-] 26.1 Implement request-signature verification in `lib/whatsapp/signature.ts`
     - Implement `computeSignatureHeader(rawBody, appSecret)` producing the `sha256=<hex>` HMAC over the exact raw bytes, and `verifySignatureWithSecret(rawBody, presentedHeader, appSecret)` doing a constant-time compare that returns `false` (never throws) on any body/secret/signature alteration or malformed/wrong-length header
     - _Requirements: 31.3, 31.4_
 
