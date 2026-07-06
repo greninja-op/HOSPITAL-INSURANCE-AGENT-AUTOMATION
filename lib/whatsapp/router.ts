@@ -158,6 +158,16 @@ export const PATIENT_TEMPLATES = {
 
 export type PatientTemplateKey = keyof typeof PATIENT_TEMPLATES;
 
+// ─── Staff free-text action guardrail message (Requirement 45.2) ─────────────
+//
+// Deterministic fallback used when a staff message is NOT an exact structured
+// command and no `conversationalFallback` port is wired. It refuses to act and
+// points the staff member at the exact command form so every case action stays
+// traceable to an explicit command (never a guessed case id).
+
+export const STAFF_USE_COMMAND =
+  "I can't act on a case from a free-text message. To act on a case, reply with the exact command Approve <case-id> or Reject <case-id> (for example: Approve C-1024). You can also open the case in the dashboard.";
+
 // ─── Ports (all side effects flow through these) ─────────────────────────────
 
 /** A generic, PHI-free summary of a Case used for staff status / patient lookup. */
@@ -378,11 +388,20 @@ async function routeStaff(
     }
 
     case "none":
-    default:
-      // Seam: staff free-text action guardrail (Req 45, task 26.32) and the
-      // conversational fallback (Req 44, task 26.35) handle non-command staff
-      // messages. The base router takes no case action from free text.
-      return { handled: false, role: "staff" };
+    default: {
+      // Staff free-text action guardrail (Requirement 45): a staff message that
+      // is NOT an exact structured command must NOT perform or confirm any case
+      // action and must NOT guess a case id. Route to the scoped conversational
+      // fallback when wired (it refuses to act and points to the exact command /
+      // dashboard, Requirements 44.7, 45.1–45.3); otherwise send a deterministic
+      // refusal that asks for the exact `Approve <case-id>` / `Reject <case-id>`
+      // command form. Either way, `performCaseAction` is never invoked here.
+      const body = ports.conversationalFallback
+        ? await ports.conversationalFallback({ role: "staff", text: inbound.body })
+        : STAFF_USE_COMMAND;
+      await reply(ports, inbound.phone, body);
+      return { handled: true, role: "staff", reply: body };
+    }
   }
 }
 

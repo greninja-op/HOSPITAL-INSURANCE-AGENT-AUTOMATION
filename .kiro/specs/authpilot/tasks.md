@@ -267,7 +267,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 21: Appeal location is stored**
     - **Validates: Requirements 7.4**
 
-  - [~] 11.18 Implement the Verification_QA stage
+  - [x] 11.18 Implement the Verification_QA stage
     - Independently check every citation against retrieved Payer_Policy/Chart_Note data, every patient/policy/code reference against the Case Extracted_Field values, and every claim against the retrieved evidence; collect all flagged issues; derive `status` as `pass` iff the list is empty else `fail`; on a processing error store `{ status: "fail", flaggedIssues: [{ type: "verification_error", ... }] }`; store `verificationResult`, write `stepType: "verification"`, and only set the verified AwaitingApproval state after the result is stored
     - Add the grounding check: every citation and reference in the Appeal_Packet (payer-policy clause/identifier, chart-note evidence, diagnosis/procedure code, and patient) must resolve to an actual stored record in scope for the Case; for each that does not, add an `unresolved_citation` flagged issue with `severity: "blocking"`, which forces `status: "fail"` so the appeal is never presented as verified
     - Record each flagged issue as a `Finding` (`lib/findings.ts`) so blocking issues drive routing while warnings stay visible
@@ -649,7 +649,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Implement `buildRouterPorts()` binding the abstract `RouterPorts` to the real in-process services: `createCase` to the case-creation logic used by `/api/cases`, `performCaseAction` to the shared `lib/caseActions.ts` operation used by `/api/cases/[id]/action` (task 15.10), the lookups to Prisma queries, `classifyMedia` to the media gate (task 26.22), `detectEmergency` to the deterministic emergency detector (task 26.25), `recordHandoff` to the handoff store + staff broadcast (task 26.27), `conversationalFallback` to the scoped LLM fallback (task 26.29), `send` to `createSender(config)`, and `guard` to `screenUntrusted`
     - _Requirements: 34.2, 34.6, 34.8, 40.2, 41.1, 42.4, 43.1, 44.1_
 
-  - [~] 26.15 Wire the webhook POST inbound pipeline in `app/api/whatsapp/webhook/route.ts`
+  - [x] 26.15 Wire the webhook POST inbound pipeline in `app/api/whatsapp/webhook/route.ts`
     - Implement the `POST` handler pipeline: capture the raw request bytes → HMAC-verify the `X-Hub-Signature-256` header over those exact bytes (when an app secret is configured) → acknowledge fast with 200 → dedupe by inbound message id → parse to `NormalizedInbound` → route via `routeInbound(buildRouterPorts())` → reply with a template; screen inbound text through the `Safety_Guard` before any Qwen prompt, create WhatsApp-originated Cases with `intakeType: "whatsapp_patient_note"`, and write channel-originated domain actions to the same `Trace_Step`/`Audit_Chain` entries the in-app flow uses
     - _Requirements: 31.3, 31.4, 31.5, 31.6, 31.7, 36.2, 36.3, 1.10, 1.11_
 
@@ -717,7 +717,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert that inbound messages which are non-command (staff), non-trigger, and non-status are routed into `conversationalFallback` under the correct role scope; the routing decision is deterministic and testable even though the reply wording is not
     - _Requirements: 44.1, 32.7, 34.10_
 
-  - [~] 26.32 Implement the staff free-text action guardrail in `lib/whatsapp/router.ts`
+  - [x] 26.32 Implement the staff free-text action guardrail in `lib/whatsapp/router.ts`
     - When a staff message expresses an intent to act (e.g. "approve this", "please send it", "reject that one") **without** an exact structured command with an explicit case id, refuse: take **no case action** (never invoke `performCaseAction`), never guess a case id, and reply asking the staff member to use the structured format `Approve <case-id>` or `Reject <case-id>`; only a well-formed `parseStaffCommand` result with an explicit case id ever reaches `performCaseAction`
     - _Requirements: 45.1, 45.2, 45.3, 34.9, 44.7_
 

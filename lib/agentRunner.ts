@@ -47,6 +47,8 @@ import { Prisma } from "@prisma/client";
 import { callQwen, type ChatMessage, type ToolSchema } from "./qwen";
 import {
   dispatchTool,
+  type PatientRecord,
+  type PayerPolicy,
   type ToolName,
   type ToolObservation,
 } from "./agentTools";
@@ -55,16 +57,25 @@ import { createTraceStep, prisma } from "./db";
 import { screenUntrusted } from "./guard";
 import { assertTransition } from "./caseStatus";
 import { computeOverallConfidence, decide } from "./decisionEngine";
-import { blockingCount, gapFinding, warningFindings } from "./findings";
+import {
+  blockingCount,
+  gapFinding,
+  verificationFindings,
+  warningFindings,
+} from "./findings";
 import type {
   CaseStatus,
   Finding,
+  FindingSeverity,
+  FlaggedIssue,
+  FlaggedIssueType,
   PipelineStage,
   QwenFailure,
   ResolutionPath,
   StepType,
   StrategyOption,
   StrategyOptions,
+  VerificationResult,
 } from "./types";
 import type { AppealContent, Recommendation } from "./types";
 
@@ -1679,9 +1690,408 @@ async function appealGenerationStage(
   return { status: "completed", summary: { stage, note }, iterations: 1 };
 }
 
-/** SEAM — Task 11.18 fills the independent citation/reference verification. */
-function verificationQaStage(ctx: StageContext): Promise<StageSummary> {
-  return runStageSeam(ctx, "Verification_QA", "11.18");
+// ─── Verification_QA stage body (Task 11.18) ──────────────────────────────────
+//
+// Independently checks the drafted Appeal_Packet against the retrieved
+// Payer_Policy / Chart_Note data and the Case Extracted_Field values, using ONLY
+// the two re-read tools permitted in this stage (fetchPatientRecord,
+// fetchPayerPolicy — no new tool, Req 22). It:
+//   • checks every citation against the retrieved Payer_Policy/Chart_Note data
+//     (Req 22.1), every patient/policy/code reference against the Extracted_Field
+//     values (Req 22.2), and every claim against retrieved evidence (Req 22.3);
+//   • runs the grounding check (Req 22.8): every citation/reference must resolve
+//     to an actual stored in-scope record (the Case's linked/derived Payer,
+//     ChartNotes, Patient); each one that does not becomes a blocking
+//     `unresolved_citation` issue that forces status "fail" (Req 22.9);
+//   • derives status = "pass" iff no issue was flagged, else "fail" (Req 22.4);
+//   • on a processing error stores a fail result carrying a single blocking
+//     `verification_error` issue and never presents the appeal as verified
+//     (Req 22.7);
+//   • persists Case.verificationResult (Req 23.2), writes the single
+//     `verification` Trace_Step (Req 20.10), records each flagged issue as a
+//     structured Finding (Req 29.1, 29.3), and ONLY AFTER the result is stored
+//     moves the Case to AwaitingApproval so it is never presented for
+//     Human_Approval before verification has run (Req 22.5).
+//
+// It runs only on the drafting paths (an appeal exists); for Escalate_To_Human
+// there is no appeal to verify, so it skips gracefully.
+
+/** Trimmed, case-insensitive text equivalence for reference matching. */
+function textEquivalent(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/** Build a FlaggedIssue with an explicit severity (grounding failures blocking, Req 22.9, 29.3). */
+function flaggedIssue(
+  type: FlaggedIssueType,
+  reference: string,
+  detail: string,
+  severity: FindingSeverity = "blocking",
+): FlaggedIssue {
+  return { type, reference, detail, severity };
+}
+
+/** Clip an argument body to a short reference label for a flagged claim. */
+function claimReference(argument: string): string {
+  const trimmed = argument.trim();
+  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
+}
+
+/**
+ * Independently check the reconstructed Appeal_Packet `content` against the
+ * re-read Chart_Note / Payer_Policy records and the Case Extracted_Field values,
+ * collecting every flagged issue (Req 22.1–22.3, 22.8, 22.9). The re-read
+ * `patientRecord` / `payerPolicy` are the authoritative in-scope records: a
+ * citation/reference that cannot resolve against them is a blocking
+ * `unresolved_citation` (Req 22.9).
+ */
+function collectVerificationIssues(params: {
+  content: AppealContent;
+  patientRecord: PatientRecord | null;
+  payerPolicy: PayerPolicy | null;
+  fields: { fieldName: string; value: string }[];
+}): FlaggedIssue[] {
+  const { content, patientRecord, payerPolicy, fields } = params;
+  const issues: FlaggedIssue[] = [];
+
+  const patientField = usableFieldValue(fields, INTAKE_FIELD_NAMES.patient);
+  const procedureField = usableFieldValue(
+    fields,
+    INTAKE_FIELD_NAMES.procedureCode,
+  );
+  const diagnosisField = usableFieldValue(
+    fields,
+    INTAKE_FIELD_NAMES.diagnosisCode,
+  );
+  const denialField = usableFieldValue(fields, INTAKE_FIELD_NAMES.denialReason);
+
+  // 1) Patient reference — grounding (Req 22.8/22.9) then reference match (Req 22.2).
+  const patientRef = content.patientName?.trim() ?? "";
+  if (!patientRecord) {
+    issues.push(
+      flaggedIssue(
+        "unresolved_citation",
+        patientRef || "(patient)",
+        "The patient referenced by the appeal does not resolve to a stored patient record in scope for the Case.",
+      ),
+    );
+  } else if (patientRef !== "") {
+    if (patientField && !textEquivalent(patientRef, patientField)) {
+      issues.push(
+        flaggedIssue(
+          "reference_mismatch",
+          patientRef,
+          `The patient reference "${patientRef}" does not match the Case Extracted_Field patient value "${patientField}".`,
+        ),
+      );
+    } else if (!textEquivalent(patientRef, patientRecord.patient.name)) {
+      issues.push(
+        flaggedIssue(
+          "reference_mismatch",
+          patientRef,
+          `The patient reference "${patientRef}" does not match the stored patient record name "${patientRecord.patient.name}".`,
+        ),
+      );
+    }
+  }
+
+  // 2) Payer-policy citation — grounding (Req 22.8/22.9) then support (Req 22.1).
+  const policyRef = content.policyClause?.trim() ?? "";
+  if (!payerPolicy) {
+    issues.push(
+      flaggedIssue(
+        "unresolved_citation",
+        policyRef || "(payer policy)",
+        "The payer-policy clause cited by the appeal does not resolve to a stored Payer_Policy record in scope for the Case.",
+      ),
+    );
+  } else if (
+    typeof payerPolicy.criteriaText !== "string" ||
+    payerPolicy.criteriaText.trim() === ""
+  ) {
+    issues.push(
+      flaggedIssue(
+        "unsupported_citation",
+        policyRef || payerPolicy.policyCode,
+        "The cited payer policy resolved to a record with no medical-necessity criteria text to support the citation.",
+      ),
+    );
+  }
+
+  // 3) Procedure-code reference — reference match against the retrieved policy (Req 22.2).
+  //    (When no policy resolved, the payer-policy unresolved issue above already
+  //    fails the appeal, so no duplicate code issue is added.)
+  if (procedureField && payerPolicy) {
+    if (!textEquivalent(procedureField, payerPolicy.procedureCode)) {
+      issues.push(
+        flaggedIssue(
+          "reference_mismatch",
+          procedureField,
+          `The procedure code "${procedureField}" does not match the retrieved payer policy procedure code "${payerPolicy.procedureCode}".`,
+        ),
+      );
+    }
+  }
+
+  // 4) Diagnosis-code reference — grounding + reference match against the chart (Req 22.2, 22.8).
+  if (diagnosisField && patientRecord) {
+    const chartCodes = patientRecord.chartNotes.map((n) => n.diagnosisCode);
+    if (chartCodes.length === 0) {
+      issues.push(
+        flaggedIssue(
+          "unresolved_citation",
+          diagnosisField,
+          `The diagnosis code "${diagnosisField}" does not resolve to any Chart_Note record in scope for the Case.`,
+        ),
+      );
+    } else if (!chartCodes.some((c) => textEquivalent(c, diagnosisField))) {
+      issues.push(
+        flaggedIssue(
+          "reference_mismatch",
+          diagnosisField,
+          `The diagnosis code "${diagnosisField}" does not match any diagnosis code recorded in the patient's chart notes.`,
+        ),
+      );
+    }
+  }
+
+  // 5) Chart-note evidence citations — support (Req 22.1) + grounding (Req 22.8).
+  const evidence = Array.isArray(content.supportingEvidence)
+    ? content.supportingEvidence.filter((e) => e.trim() !== "")
+    : [];
+  const hasChart = !!patientRecord && patientRecord.chartNotes.length > 0;
+  if (evidence.length > 0 && !hasChart) {
+    for (const line of evidence) {
+      issues.push(
+        flaggedIssue(
+          "unsupported_citation",
+          line,
+          "The appeal cites supporting chart-note evidence, but no Chart_Note record in scope backs it.",
+        ),
+      );
+    }
+  }
+
+  // 6) Denial-reason reference — reference match against the Extracted_Field (Req 22.2).
+  const denialRef = content.denialReason?.trim() ?? "";
+  if (denialRef !== "" && denialField && !textEquivalent(denialRef, denialField)) {
+    issues.push(
+      flaggedIssue(
+        "reference_mismatch",
+        denialRef,
+        `The denial reason referenced by the appeal does not match the Case Extracted_Field denial reason "${denialField}".`,
+      ),
+    );
+  }
+
+  // 7) Claims in the argument — support against retrieved evidence (Req 22.3).
+  const argument = content.argument?.trim() ?? "";
+  const hasPolicyEvidence =
+    !!payerPolicy &&
+    typeof payerPolicy.criteriaText === "string" &&
+    payerPolicy.criteriaText.trim() !== "";
+  if (argument !== "" && !hasChart && !hasPolicyEvidence) {
+    issues.push(
+      flaggedIssue(
+        "unsupported_claim",
+        claimReference(argument),
+        "The appeal's argument makes claims but no retrieved Chart_Note or Payer_Policy evidence backs them.",
+      ),
+    );
+  }
+
+  return issues;
+}
+
+/**
+ * Verification_QA stage body (Task 11.18) — independently verifies the drafted
+ * Appeal_Packet on the drafting paths, stores the Verification_Result (Req 23.2)
+ * and a `verification` Trace_Step (Req 20.10), records each flagged issue as a
+ * Finding (Req 29.1, 29.3), and gates Human_Approval on the stored result
+ * (Req 22.5). For Escalate_To_Human there is no appeal, so it skips gracefully.
+ */
+async function verificationQaStage(
+  ctx: StageContext,
+): Promise<StageOutcome<StageSummary>> {
+  const stage = "Verification_QA" as const;
+
+  const kase = await prisma.case.findUnique({
+    where: { id: ctx.caseId },
+    select: {
+      status: true,
+      resolutionPath: true,
+      recommendation: true,
+      requestedEvidence: true,
+      denialReason: true,
+      appealPdfUrl: true,
+      patientId: true,
+      payerId: true,
+      patient: { select: { name: true } },
+    },
+  });
+  if (!kase) {
+    throw new Error(`Verification_QA: Case "${ctx.caseId}" not found.`);
+  }
+
+  const resolutionPath = kase.resolutionPath as ResolutionPath | null;
+
+  // ── Skip gracefully on non-drafting paths: no Appeal_Packet to verify ───────
+  if (
+    !resolutionPath ||
+    !DRAFTING_PATHS.has(resolutionPath) ||
+    !kase.appealPdfUrl
+  ) {
+    const reason =
+      !resolutionPath || !DRAFTING_PATHS.has(resolutionPath)
+        ? `Resolution_Path is ${resolutionPath ?? "unset"} — not a drafting path`
+        : "no Appeal_Packet was generated";
+    const note = `[${stage}] ${reason}; there is no appeal to verify, skipping Verification_QA (Req 22).`;
+    await createTraceStep({
+      caseId: ctx.caseId,
+      stepType: STAGE_STEP_TYPE[stage],
+      reasoning: note,
+      output: {
+        resolutionPath: resolutionPath ?? null,
+        verified: false,
+        skipped: true,
+      },
+    });
+    return { status: "completed", summary: { stage, note }, iterations: 1 };
+  }
+
+  // ── Independent verification, guarded so a processing error still stores a
+  //    fail result rather than aborting the pipeline (Req 22.7). ──────────────
+  let result: VerificationResult;
+  try {
+    const fields = await prisma.extractedField.findMany({
+      where: { caseId: ctx.caseId },
+      select: { fieldName: true, value: true },
+    });
+
+    const procedureCode = usableFieldValue(
+      fields,
+      INTAKE_FIELD_NAMES.procedureCode,
+    );
+    const patientName =
+      usableFieldValue(fields, INTAKE_FIELD_NAMES.patient) ??
+      kase.patient?.name ??
+      "";
+    const denialReason =
+      usableFieldValue(fields, INTAKE_FIELD_NAMES.denialReason) ??
+      kase.denialReason ??
+      "";
+
+    // Re-read the in-scope chart + policy through the two permitted tools (no
+    // new tool, Req 22); each dispatch records a stage-tagged tool_call Trace_Step.
+    let patientRecord: PatientRecord | null = null;
+    if (kase.patientId) {
+      const obs = await dispatchTool(
+        "fetchPatientRecord",
+        { patientId: kase.patientId },
+        ctx.caseId,
+        stage,
+      );
+      if (obs.ok) patientRecord = obs.result as PatientRecord;
+    }
+    let payerPolicy: PayerPolicy | null = null;
+    if (kase.payerId && procedureCode) {
+      const obs = await dispatchTool(
+        "fetchPayerPolicy",
+        { payerId: kase.payerId, procedureCode },
+        ctx.caseId,
+        stage,
+      );
+      if (obs.ok) payerPolicy = (obs.result as PayerPolicy | null) ?? null;
+    }
+
+    // Reconstruct the Appeal_Packet content the Appeal_Generation stage rendered
+    // (same decision-output derivation, Req 7.2) so verification checks the
+    // ACTUAL packet's citations/references/claims.
+    const content = buildAppealContent({
+      recommendation: (kase.recommendation as Recommendation | null) ?? null,
+      patientName,
+      denialReason,
+      resolutionPath,
+      requestedEvidence: kase.requestedEvidence,
+      summaries: ctx.summaries,
+    });
+
+    const flaggedIssues = collectVerificationIssues({
+      content,
+      patientRecord,
+      payerPolicy,
+      fields,
+    });
+
+    // Req 22.4 — pass iff no issue was flagged, else fail (a blocking
+    // unresolved_citation forces fail per Req 22.9).
+    result = {
+      status: flaggedIssues.length === 0 ? "pass" : "fail",
+      flaggedIssues,
+    };
+  } catch (err) {
+    // Req 22.7 — checks could not complete: store a fail result carrying a
+    // single blocking verification_error issue; do not present as verified.
+    const detail = err instanceof Error ? err.message : String(err);
+    result = {
+      status: "fail",
+      flaggedIssues: [
+        flaggedIssue(
+          "verification_error",
+          "verification",
+          `The Verification_QA checks could not be completed: ${detail}`,
+        ),
+      ],
+    };
+  }
+
+  // Req 23.2 — persist the Verification_Result on the Case as a structured JSON
+  // field, retrievable independently of the recommendation.
+  await prisma.case.update({
+    where: { id: ctx.caseId },
+    data: { verificationResult: result as unknown as Prisma.InputJsonValue },
+  });
+
+  // Req 29.1 / 29.3 — record each flagged issue as a structured Finding.
+  const findings = verificationFindings(ctx.caseId, result.flaggedIssues);
+
+  // Req 20.10 / 20.5 — the single stage-labeled `verification` Trace_Step.
+  const note =
+    result.status === "pass"
+      ? `[${stage}] Verification passed: every Appeal_Packet citation/reference/claim resolved to an in-scope record and matched the Extracted_Field values (0 issues, Req 22.4).`
+      : `[${stage}] Verification failed: ${result.flaggedIssues.length} flagged issue(s) (${blockingCount(findings)} blocking); the appeal is not presented as verified (Req 22.4, 22.9).`;
+  await createTraceStep({
+    caseId: ctx.caseId,
+    stepType: STAGE_STEP_TYPE[stage],
+    reasoning: note,
+    output: {
+      status: result.status,
+      flaggedIssues: result.flaggedIssues as unknown as Prisma.InputJsonValue,
+      findings: findings.map((f) => ({
+        findingId: f.findingId,
+        kind: f.kind,
+        severity: f.severity,
+      })),
+    },
+  });
+
+  // Req 22.5 — only AFTER the Verification_Result has been stored is the Case
+  // eligible for Human_Approval; move it to AwaitingApproval through the guarded
+  // state machine (a no-op when it is already AwaitingApproval).
+  const from = kase.status as CaseStatus;
+  const transition = assertTransition(from, "AwaitingApproval");
+  if (transition.ok && !transition.noop) {
+    await prisma.case.update({
+      where: { id: ctx.caseId },
+      data: { status: "AwaitingApproval" },
+    });
+  }
+
+  return { status: "completed", summary: { stage, note }, iterations: 1 };
 }
 
 // ─── Orchestration helpers ────────────────────────────────────────────────────
