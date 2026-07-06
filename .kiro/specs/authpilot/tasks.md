@@ -12,7 +12,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `PipelineStage`, `intakeType`, `sourceType`, `stepType` (the seven allowed values), `Recommendation`, `AppealContent`, `StrategyOption`/`StrategyOptions`, `FlaggedIssue`/`VerificationResult`, plus the hardening types `Finding`/`FindingKind`/`FindingSeverity`, `QwenOutcome`/`QwenFailure`/`QwenFailureKind`, `AuditVerifyResult`, the status-transition types used by the case-status state machine, and the Shared_Case_Action types `CaseActionType`/`CaseActionMeta`/`CaseActionResult` (mirroring the `performCaseAction` interface in the design) so both the action route and the WhatsApp router can reference them without importing each other
   - _Requirements: 5.7, 5.8, 5.9, 23.3, 40.1_
 
-- [ ] 2. Define the data layer with Prisma
+- [x] 2. Define the data layer with Prisma
   - [x] 2.1 Author the Prisma schema and generate the client
     - Define `Patient`, `ChartNote`, `Payer`, `PayerPolicy`, `Case`, `ExtractedField`, `TraceStep` models per the design, including `Case.isUrgent`, `resolutionPath`, `denialReason`, `requestedEvidence`, `plainEnglishExplanation`, `recommendation`, `appealPdfUrl`, `resolvedAt`, and the multi-stage pipeline fields `Case.strategyOptions` (Json?) and `Case.verificationResult` (Json?)
     - Add the Case payer reference to the schema: `Case.payerId` (String?, optional relation to `Payer`) and the `Case.payerName` (String?) convenience field used as the denials-by-payer analytics grouping key, plus the corresponding `Payer.cases Case[]` reverse relation
@@ -36,7 +36,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 23.3, 23.6**
     - Use the stepType generator (values inside and outside the seven allowed values)
 
-  - [ ] 2.4 Configure data-store portability (SQLite default, single-switch PostgreSQL)
+  - [x] 2.4 Configure data-store portability (SQLite default, single-switch PostgreSQL)
     - Keep a single Prisma `datasource db` with `provider = "sqlite"` by default and `url = env("DATABASE_URL")`; ensure no model uses a SQLite-only construct and that `Json` columns map transparently to `TEXT`/`JSONB`, so switching to PostgreSQL is a single configuration change (set the datasource `provider` to `"postgresql"` and point `DATABASE_URL` at Postgres) with no change to application logic
     - _Requirements: 39.1, 39.2_
 
@@ -355,7 +355,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert immediate caseId return without waiting for the run (1.5) and PDF text extraction on upload (1.2)
     - _Requirements: 1.2, 1.5_
 
-- [ ] 14. Implement case read, trace, and analytics APIs
+- [x] 14. Implement case read, trace, and analytics APIs
   - [x] 14.1 Implement `GET /api/cases` and `GET /api/cases/[id]`
     - List all cases for the Dashboard; return full case detail (fields, trace steps, recommendation, appeal); 404 on unknown id
     - _Requirements: 10.1, 13.1_
@@ -364,7 +364,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 28: Dashboard grouping partitions all cases**
     - **Validates: Requirements 10.1**
 
-  - [ ] 14.3 Implement `GET /api/cases/[id]/trace` with since-timestamp filtering
+  - [x] 14.3 Implement `GET /api/cases/[id]/trace` with since-timestamp filtering
     - Return only Trace_Steps whose timestamp is strictly after the `since` value
     - _Requirements: 11.3_
 
@@ -372,7 +372,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 29: Trace-since returns only newer steps**
     - **Validates: Requirements 11.3**
 
-  - [ ] 14.5 Implement the audit merge and `GET /api/cases/[id]/audit/export`
+  - [x] 14.5 Implement the audit merge and `GET /api/cases/[id]/audit/export`
     - Merge Extracted_Field and Trace_Step records chronologically (non-decreasing by timestamp, lossless); return the persisted `strategyOptions` and `verificationResult` for the Case unchanged from what the Strategy and Verification_QA stages stored, retrievable independently of the recommendation; generate an audit-trail PDF for export
     - _Requirements: 9.3, 9.4, 23.4_
 
@@ -384,7 +384,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Generate an audit PDF for a case and assert it contains the full trail
     - _Requirements: 9.4_
 
-  - [ ] 14.8 Implement `GET /api/analytics`, `GET /api/policies/compare`, and `GET /api/patients/search`
+  - [x] 14.8 Implement `GET /api/analytics`, `GET /api/policies/compare`, and `GET /api/patients/search`
     - Denials-by-payer aggregation grouping Cases by the Case payer reference (`Case.payerId`/`Case.payerName`), placing every Case whose payer reference is unset into a single "Unknown payer" bucket so grouped totals equal the number of Cases with a denial reason; resolution rate, average time-to-resolution, at-risk list; per-payer policy retrieval and diff explanation for a procedure code; patient-name search
     - _Requirements: 14.1, 14.2, 14.3, 14.4, 17.1, 17.2, 19.2_
 
