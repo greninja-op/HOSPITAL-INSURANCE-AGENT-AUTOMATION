@@ -255,7 +255,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 16: Decisions are traced**
     - **Validates: Requirements 5.6**
 
-  - [~] 11.15 Implement the Appeal_Generation stage
+  - [x] 11.15 Implement the Appeal_Generation stage
     - For Auto_Draft / Draft_And_Request_Evidence, generate the appeal PDF from the Decision_Intelligence stage output and store `appealPdfUrl`; skip generation on Escalate_To_Human
     - _Requirements: 7.1, 7.2_
 
@@ -645,7 +645,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 71: Patient outbound is always a PHI-free template**
     - **Validates: Requirements 33.2, 33.3, 33.4, 36.3**
 
-  - [~] 26.14 Implement the port-binding composition root in `lib/whatsapp/wiring.ts`
+  - [x] 26.14 Implement the port-binding composition root in `lib/whatsapp/wiring.ts`
     - Implement `buildRouterPorts()` binding the abstract `RouterPorts` to the real in-process services: `createCase` to the case-creation logic used by `/api/cases`, `performCaseAction` to the shared `lib/caseActions.ts` operation used by `/api/cases/[id]/action` (task 15.10), the lookups to Prisma queries, `classifyMedia` to the media gate (task 26.22), `detectEmergency` to the deterministic emergency detector (task 26.25), `recordHandoff` to the handoff store + staff broadcast (task 26.27), `conversationalFallback` to the scoped LLM fallback (task 26.29), `send` to `createSender(config)`, and `guard` to `screenUntrusted`
     - _Requirements: 34.2, 34.6, 34.8, 40.2, 41.1, 42.4, 43.1, 44.1_
 
@@ -661,7 +661,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert an inbound and an outbound message each produce a `WhatsAppMessage` row with the correct direction, role, message type, and linked Case
     - _Requirements: 36.1_
 
-  - [~] 26.18 Implement WhatsApp staff notifications
+  - [x] 26.18 Implement WhatsApp staff notifications
     - Send staff notification `WhatsApp_Message`s to the registered `Staff_Number` for: a new Case created from a patient message, a Case reaching `AwaitingApproval` (one-line Decision_Intelligence summary + overall Confidence_Score), an approaching SLA_Clock deadline, and a Verification_QA-flagged issue requiring manual review
     - _Requirements: 35.1, 35.2, 35.3, 35.4_
 
@@ -669,7 +669,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert each of the four notification triggers sends a staff notification with the expected generic content
     - _Requirements: 35.1, 35.2, 35.3, 35.4_
 
-  - [~] 26.20 Implement the one-off WhatsApp setup automation in `scripts/setup-whatsapp.ts`
+  - [x] 26.20 Implement the one-off WhatsApp setup automation in `scripts/setup-whatsapp.ts`
     - Provide a conversational one-off setup script that configures the WhatsApp channel (webhook subscription, template registration) using the loaded config; no strict acceptance requirement (setup/ops)
 
   - [ ]* 26.21 Write optional smoke test for the setup script

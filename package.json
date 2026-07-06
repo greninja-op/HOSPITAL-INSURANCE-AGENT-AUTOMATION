@@ -11,6 +11,7 @@
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "eval": "tsx scripts/eval.ts",
+    "setup:whatsapp": "tsx scripts/setup-whatsapp.ts",
     "prisma:generate": "prisma generate",
     "prisma:seed": "tsx prisma/seed.ts",
     "db:push": "prisma db push",

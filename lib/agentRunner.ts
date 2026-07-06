@@ -50,6 +50,7 @@ import {
   type ToolName,
   type ToolObservation,
 } from "./agentTools";
+import { generateAppealPdf } from "./appealPdf";
 import { createTraceStep, prisma } from "./db";
 import { screenUntrusted } from "./guard";
 import { assertTransition } from "./caseStatus";
@@ -65,6 +66,7 @@ import type {
   StrategyOption,
   StrategyOptions,
 } from "./types";
+import type { AppealContent, Recommendation } from "./types";
 
 // Re-export so downstream stage tasks and tests import the stage union from the
 // Agent_Runner without reaching into lib/types directly.
@@ -1501,9 +1503,180 @@ async function decisionIntelligenceStage(
   };
 }
 
-/** SEAM — Task 11.15 fills conditional appeal-PDF generation on drafting paths. */
-function appealGenerationStage(ctx: StageContext): Promise<StageSummary> {
-  return runStageSeam(ctx, "Appeal_Generation", "11.15");
+// ─── Appeal_Generation stage body (Task 11.15) ────────────────────────────────
+//
+// Conditional appeal-PDF generation, driven by the Resolution_Path the
+// Decision_Intelligence stage (Task 11.13) persisted on the Case:
+//
+//   • Auto_Draft / Draft_And_Request_Evidence (the two DRAFTING paths) — build
+//     an `AppealContent` from the Decision_Intelligence stage OUTPUT (the Case
+//     recommendation + the Medical/Policy/Strategy/Decision stage SUMMARIES and
+//     the resolved Extracted_Field facts), NOT from the raw intake / chart /
+//     policy documents (Req 7.2). Render the PDF via `generateAppealPdf` and
+//     store the returned location reference on `Case.appealPdfUrl` (Req 7.1).
+//   • Escalate_To_Human (or any non-drafting / unset path) — SKIP generation
+//     (no PDF) and record a brief stage-labeled Trace_Step noting the skip.
+//
+// The stage never reaches raw source documents: its inputs are the digested
+// stage summaries carried on `ctx.summaries` plus the structured, already-
+// resolved Extracted_Field values — the Decision_Intelligence output surface.
+
+/** The two Resolution_Paths that draft an appeal (Req 7.1). */
+const DRAFTING_PATHS: ReadonlySet<ResolutionPath> = new Set<ResolutionPath>([
+  "Auto_Draft",
+  "Draft_And_Request_Evidence",
+]);
+
+/** Strip a leading "[Stage] " label from a stage summary note for prose reuse. */
+function stripStageLabel(note: string | undefined | null): string {
+  if (typeof note !== "string") return "";
+  return note.replace(/^\s*\[[^\]]+\]\s*/, "").trim();
+}
+
+/**
+ * Build the `AppealContent` for the PDF from the Decision_Intelligence stage
+ * OUTPUT rather than the raw source documents (Req 7.2):
+ *   • a stored `Case.recommendation.appealContent` is used verbatim when present
+ *     (it is the decision stage's own assembled content);
+ *   • otherwise the content is assembled from the digested Medical/Policy/
+ *     Strategy/Decision stage summaries plus the resolved Extracted_Field facts.
+ */
+function buildAppealContent(params: {
+  recommendation: Recommendation | null;
+  patientName: string;
+  denialReason: string;
+  resolutionPath: ResolutionPath;
+  requestedEvidence: string | null;
+  summaries: Partial<Record<PipelineStage, StageSummary>>;
+}): AppealContent {
+  // Prefer the decision stage's own assembled appeal content when stored.
+  const stored = params.recommendation?.appealContent;
+  if (stored) return stored;
+
+  const policyReview = stripStageLabel(params.summaries.Policy_Review?.note);
+  const medicalReview = stripStageLabel(params.summaries.Medical_Review?.note);
+  const strategy = stripStageLabel(params.summaries.Strategy?.note);
+  const decision = stripStageLabel(params.summaries.Decision_Intelligence?.note);
+
+  // Supporting evidence lines: the clinical (medical) assessment and the chosen
+  // strategy, both derived from stage summaries (Req 7.2).
+  const supportingEvidence = [medicalReview, strategy].filter(
+    (line) => line.length > 0,
+  );
+
+  // Assemble the argument body from the decision + strategy summaries and, on
+  // the medium path, the specific additional evidence requested (Req 5.8).
+  const argumentParts: string[] = [];
+  if (decision) argumentParts.push(decision);
+  if (
+    params.resolutionPath === "Draft_And_Request_Evidence" &&
+    params.requestedEvidence &&
+    params.requestedEvidence.trim() !== ""
+  ) {
+    argumentParts.push(
+      `Additional evidence requested to strengthen this appeal: ${params.requestedEvidence.trim()}.`,
+    );
+  }
+  const argument =
+    argumentParts.length > 0
+      ? argumentParts.join(" ")
+      : "This appeal is submitted based on the agent's investigation of the patient chart and payer medical-necessity policy.";
+
+  return {
+    patientName: params.patientName,
+    denialReason: params.denialReason,
+    policyClause:
+      policyReview !== ""
+        ? policyReview
+        : "The referenced payer medical-necessity policy criteria for the requested procedure.",
+    supportingEvidence,
+    argument,
+  };
+}
+
+/**
+ * Appeal_Generation stage body (Task 11.15) — conditional on the Resolution_Path
+ * the Decision_Intelligence stage persisted on the Case:
+ *   • Auto_Draft / Draft_And_Request_Evidence — build `AppealContent` from the
+ *     decision output (Req 7.2), render it via `generateAppealPdf`, and store
+ *     the location reference on `Case.appealPdfUrl` (Req 7.1).
+ *   • Escalate_To_Human / any non-drafting path — skip generation and record a
+ *     brief stage-labeled Trace_Step noting the skip.
+ */
+async function appealGenerationStage(
+  ctx: StageContext,
+): Promise<StageOutcome<StageSummary>> {
+  const stage = "Appeal_Generation" as const;
+
+  const kase = await prisma.case.findUnique({
+    where: { id: ctx.caseId },
+    select: {
+      resolutionPath: true,
+      recommendation: true,
+      requestedEvidence: true,
+      denialReason: true,
+      patient: { select: { name: true } },
+    },
+  });
+  if (!kase) {
+    throw new Error(`Appeal_Generation: Case "${ctx.caseId}" not found.`);
+  }
+
+  const resolutionPath = kase.resolutionPath as ResolutionPath | null;
+
+  // ── Non-drafting path (Escalate_To_Human or unset): SKIP generation ─────────
+  if (!resolutionPath || !DRAFTING_PATHS.has(resolutionPath)) {
+    const note = `[${stage}] Resolution_Path is ${resolutionPath ?? "unset"} — not a drafting path; skipping appeal PDF generation (Req 7.1).`;
+    await createTraceStep({
+      caseId: ctx.caseId,
+      stepType: STAGE_STEP_TYPE[stage],
+      reasoning: note,
+      output: { resolutionPath: resolutionPath ?? null, generated: false },
+    });
+    return { status: "completed", summary: { stage, note }, iterations: 1 };
+  }
+
+  // ── Drafting path: assemble content from the decision output (Req 7.2) ──────
+  const fields = await prisma.extractedField.findMany({
+    where: { caseId: ctx.caseId },
+    select: { fieldName: true, value: true },
+  });
+  const patientName =
+    usableFieldValue(fields, INTAKE_FIELD_NAMES.patient) ??
+    kase.patient?.name ??
+    "";
+  const denialReason =
+    usableFieldValue(fields, INTAKE_FIELD_NAMES.denialReason) ??
+    kase.denialReason ??
+    "";
+
+  const recommendation = (kase.recommendation as Recommendation | null) ?? null;
+
+  const content = buildAppealContent({
+    recommendation,
+    patientName,
+    denialReason,
+    resolutionPath,
+    requestedEvidence: kase.requestedEvidence,
+    summaries: ctx.summaries,
+  });
+
+  // Req 7.1 — render the appeal PDF and store its location reference.
+  const { url } = await generateAppealPdf(ctx.caseId, content);
+  await prisma.case.update({
+    where: { id: ctx.caseId },
+    data: { appealPdfUrl: url },
+  });
+
+  const note = `[${stage}] Generated the appeal PDF from the Decision_Intelligence output for Resolution_Path ${resolutionPath} (Req 7.1, 7.2); stored at ${url}.`;
+  await createTraceStep({
+    caseId: ctx.caseId,
+    stepType: STAGE_STEP_TYPE[stage],
+    reasoning: note,
+    output: { resolutionPath, generated: true, appealPdfUrl: url },
+  });
+
+  return { status: "completed", summary: { stage, note }, iterations: 1 };
 }
 
 /** SEAM — Task 11.18 fills the independent citation/reference verification. */
