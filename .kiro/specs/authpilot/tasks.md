@@ -13,7 +13,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - _Requirements: 5.7, 5.8, 5.9, 23.3, 40.1_
 
 - [ ] 2. Define the data layer with Prisma
-  - [-] 2.1 Author the Prisma schema and generate the client
+  - [x] 2.1 Author the Prisma schema and generate the client
     - Define `Patient`, `ChartNote`, `Payer`, `PayerPolicy`, `Case`, `ExtractedField`, `TraceStep` models per the design, including `Case.isUrgent`, `resolutionPath`, `denialReason`, `requestedEvidence`, `plainEnglishExplanation`, `recommendation`, `appealPdfUrl`, `resolvedAt`, and the multi-stage pipeline fields `Case.strategyOptions` (Json?) and `Case.verificationResult` (Json?)
     - Add the Case payer reference to the schema: `Case.payerId` (String?, optional relation to `Payer`) and the `Case.payerName` (String?) convenience field used as the denials-by-payer analytics grouping key, plus the corresponding `Payer.cases Case[]` reverse relation
     - Extend `TraceStep.stepType` to allow the seven values `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`

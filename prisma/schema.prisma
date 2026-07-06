@@ -1,0 +1,152 @@
+// AuthPilot Prisma schema.
+//
+// PostgreSQL is the datasource. Native `Json` columns (JSONB) are used for the
+// structured Case/TraceStep/IdempotencyKey payloads. Provider portability is
+// preserved through Prisma: all persistence goes through the client and no model
+// uses a Postgres-only construct, so pointing DATABASE_URL at any Prisma-supported
+// engine that also supports `Json` is a single configuration change with no
+// application-logic change. (Requirements 39.1, 39.2)
+//
+// Local Postgres (docker-compose): bring it up with `docker compose up -d postgres`
+// then set DATABASE_URL=postgresql://authpilot:authpilot@localhost:5433/authpilot.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Patient {
+  id         String      @id @default(cuid())
+  name       String
+  dob        DateTime
+  payerId    String
+  payer      Payer       @relation(fields: [payerId], references: [id])
+  chartNotes ChartNote[]
+  cases      Case[]
+}
+
+model ChartNote {
+  id            String   @id @default(cuid())
+  patientId     String
+  patient       Patient  @relation(fields: [patientId], references: [id])
+  noteDate      DateTime
+  content       String
+  diagnosisCode String
+}
+
+model Payer {
+  id       String        @id @default(cuid())
+  name     String
+  policies PayerPolicy[]
+  patients Patient[]
+  cases    Case[]
+}
+
+model PayerPolicy {
+  id            String @id @default(cuid())
+  payerId       String
+  payer         Payer  @relation(fields: [payerId], references: [id])
+  policyCode    String // e.g. "LCD L34567"
+  procedureCode String // CPT code
+  criteriaText  String // medical necessity criteria, plain text
+}
+
+model Case {
+  id                      String           @id @default(cuid())
+  patientId               String?
+  patient                 Patient?         @relation(fields: [patientId], references: [id])
+  payerId                 String? // Case payer reference — set during Intake_And_Extraction when the payer resolves (Req 2.7, 2.8)
+  payer                   Payer?           @relation(fields: [payerId], references: [id])
+  payerName               String? // convenience copy of the resolved payer name for analytics grouping (Req 14.1)
+  intakeType              String // "denial_letter" | "new_pa_request" | "phone_note" | "whatsapp_patient_note"
+  rawIntakeText           String
+  status                  String // New | Investigating | NeedsHumanInput | AwaitingApproval | AppealSent | Resolved | DeniedFinal
+  isUrgent                Boolean          @default(false)
+  patientPhone            String? // opt-in patient WhatsApp number, used only for generic status lookups (Req 32.4)
+  patientNameHint         String? // free-text patient name hint from intake (e.g. WhatsApp), used for status-by-name lookup; not PHI-bearing linkage
+  slaDeadline             DateTime
+  resolutionPath          String? // Auto_Draft | Draft_And_Request_Evidence | Escalate_To_Human
+  overallConfidence       Float?
+  denialReason            String?
+  requestedEvidence       String?
+  plainEnglishExplanation String?
+  recommendation          Json?
+  strategyOptions         Json? // Strategy_Options: candidate approaches + win-probabilities (Req 23.1)
+  verificationResult      Json? // Verification_Result: pass/fail + flagged issues (Req 23.2)
+  appealPdfUrl            String?
+  extractedFields         ExtractedField[]
+  traceSteps              TraceStep[]
+  whatsappMessages        WhatsAppMessage[]
+  createdAt               DateTime         @default(now())
+  resolvedAt              DateTime?
+}
+
+model ExtractedField {
+  id         String   @id @default(cuid())
+  caseId     String
+  case       Case     @relation(fields: [caseId], references: [id])
+  fieldName  String
+  value      String
+  confidence Float
+  sourceType String // "raw_intake" | "chart_note" | "payer_policy" | "code_lookup" | "human_provided"
+  reasoning  String
+  timestamp  DateTime @default(now())
+}
+
+model TraceStep {
+  id          String   @id @default(cuid())
+  caseId      String
+  case        Case     @relation(fields: [caseId], references: [id])
+  stepType    String // "tool_call" | "decision" | "human_action" | "medical_review" | "policy_review" | "strategy" | "verification"
+  toolName    String?
+  input       Json?
+  output      Json?
+  reasoning   String
+  beforeState Json? // captured field values before a mutating change (Req 25.3)
+  afterState  Json? // captured field values after a mutating change (Req 25.3)
+  prevHash    String // hash of the immediately preceding audit event, or GENESIS_HASH for the first (Req 25.1, 25.2)
+  hash        String // sha256(prevHash + canonicalSerialize(content)) (Req 25.1)
+  timestamp   DateTime @default(now())
+}
+
+model IdempotencyKey {
+  key       String   @id // client-supplied Idempotency_Key (Req 26.1)
+  caseId    String
+  operation String // e.g. "approve" | "submit" | "appeal_won" | "advance"
+  result    Json // stored original operation result, replayed on retry (Req 26.2, 26.3)
+  createdAt DateTime @default(now())
+}
+
+model ProcessedMessage {
+  messageId  String   @id // inbound WhatsApp message id — the dedupe/idempotency key (Req 31.6)
+  status     String // "claimed" | "processed"
+  reservedAt DateTime @default(now()) // when the at-most-once claim was taken
+  createdAt  DateTime @default(now())
+}
+
+model WhatsAppMessage {
+  id                String   @id @default(cuid())
+  caseId            String? // linked Case where applicable (channel audit, Req 36.1)
+  case              Case?    @relation(fields: [caseId], references: [id])
+  direction         String // "inbound" | "outbound"
+  sender            String // phone number (E.164)
+  role              String // "patient" | "staff"
+  content           String // message text or template id (generic, PHI-free for patient outbound — Req 33.3)
+  messageType       String // "text" | "interactive" | "button" | "image" | "audio" | "template" | "conversational" | "notification" | "unsupported"
+  waMessageId       String? // provider message id where available
+  providerMessageId String?  @unique // inbound provider message id used for dedupe; aligns with ProcessedMessage.messageId / waMessageId (Req 31.6)
+  timestamp         DateTime @default(now())
+}
+
+model HandoffRequest {
+  id           String   @id @default(cuid())
+  caseId       String? // optional linked Case (Req 43.1)
+  patientPhone String // patient to be contacted (E.164)
+  reason       String // e.g. "patient requested a human" | "emergency language detected"
+  urgent       Boolean  @default(false) // set for emergencies; drives urgent staff notification (Req 42.2, 43.2, 43.4)
+  createdAt    DateTime @default(now())
+}
