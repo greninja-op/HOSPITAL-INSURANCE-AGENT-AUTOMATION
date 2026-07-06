@@ -153,7 +153,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 10. Implement entity extraction and detection helpers
-  - [ ] 10.1 Implement extracted-field construction in the agent layer
+  - [x] 10.1 Implement extracted-field construction in the agent layer
     - Build Extracted_Field records for patient, payer, procedure code, diagnosis code, and denial reason with field name, value, confidence, source type, reasoning, timestamp, and originating step reference; mark undeterminable entities value "unknown" and confidence 0
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 9.1_
 
@@ -169,7 +169,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 5: Undetermined entities are marked unknown**
     - **Validates: Requirements 2.3**
 
-  - [ ] 10.5 Implement contradiction, gap, and stale-note detection
+  - [x] 10.5 Implement contradiction, gap, and stale-note detection
     - Record a `Trace_Step` describing contradictions (with both conflicting sources), missing policy-required evidence gaps, and chart notes dated more than 90 days before case creation (including the note date)
     - _Requirements: 4.1, 4.2, 4.3_
 
@@ -185,7 +185,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 13: Stale chart notes are flagged at the 90-day boundary**
     - **Validates: Requirements 4.3**
 
-  - [ ] 10.9 Implement the structured Findings module in `lib/findings.ts`
+  - [x] 10.9 Implement the structured Findings module in `lib/findings.ts`
     - Define `Finding` (`findingId`, `kind`, `severity`, optional `expected`/`actual`, `technicalMessage`, `friendlyMessage`); emit a Finding for every contradiction, gap, policy, and verification issue; always assign contradictions `severity: "blocking"`, and map Verification_QA flagged issues to `blocking` or `warning` according to their effect on appeal validity
     - Implement `blockingCount(findings)` (the value fed to the Decision_Engine as `contradictionCount`) and `shouldEscalate(findings)` (true iff at least one blocking finding exists); surface `warning` findings without forcing escalation
     - _Requirements: 29.1, 29.2, 29.3_
@@ -599,7 +599,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 66: WhatsApp signature verification is exact**
     - **Validates: Requirements 31.3, 31.4**
 
-  - [ ] 26.3 Implement the GET verify handshake in `app/api/whatsapp/webhook/route.ts`
+  - [x] 26.3 Implement the GET verify handshake in `app/api/whatsapp/webhook/route.ts`
     - Add the `runtime = "nodejs"` route and its `GET` handler that compares the presented verify token against the configured verify token and echoes the presented challenge only when they match, rejecting (returning no challenge) otherwise
     - _Requirements: 31.1, 31.2_
 
