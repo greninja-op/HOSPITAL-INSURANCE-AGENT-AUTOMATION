@@ -195,7 +195,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 29.2, 29.4, 29.5**
 
 - [ ] 11. Implement the Agent_Runner nine-stage pipeline
-  - [-] 11.1 Implement pipeline scaffolding and stage orchestration in `lib/agentRunner.ts`
+  - [x] 11.1 Implement pipeline scaffolding and stage orchestration in `lib/agentRunner.ts`
     - Define the `PipelineStage` union and a `runStage(caseId, stage, ...)` helper that runs a bounded (≤ 8 iteration) plan→tool_call→observe cycle under a stage-specific system prompt and the stage's tool allow-list, tagging every Trace_Step it writes with the stage; sequence the stages in order (Intake_And_Extraction → Medical_Review/Policy_Review → Strategy → Decision_Intelligence → Appeal_Generation → Verification_QA), persisting each iteration's Trace_Steps/Extracted_Fields before the next call
     - On loop exhaustion without a decision, force Escalate_To_Human and record a Trace_Step with reasoning "needs manual review"; when `callQwen` reports a structured `QwenFailure`, degrade the calling stage gracefully by setting the Resolution_Path to Escalate_To_Human (NeedsHumanInput) rather than terminating the run abnormally; if any stage throws, record a failure Trace_Step naming the affected stage, set Escalate_To_Human, and do not run subsequent stages
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.9, 20.1, 20.5, 20.6_
@@ -524,7 +524,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert seed counts/content invariants and that reset restores the seeded set
     - _Requirements: 18.1, 18.2, 18.3, 18.4, 18.5_
 
-- [ ] 23. Implement hardening: safety guard, status FSM, audit chain, and idempotency
+- [x] 23. Implement hardening: safety guard, status FSM, audit chain, and idempotency
   - [x] 23.1 Implement the Safety_Guard in `lib/guard.ts`
     - Implement `screenUntrusted` as a deterministic, non-LLM screen that returns the content fenced and labeled as data (never as instructions) and sets `injectionDetected` true iff the text matches at least one prompt-injection / instruction-override pattern; consumed by the Intake_And_Extraction stage (task 11.5) before any Qwen call
     - _Requirements: 27.2, 27.3_
@@ -555,7 +555,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 60: Tampering breaks the chain and the first broken event is identified**
     - **Validates: Requirements 25.5, 25.6**
 
-  - [-] 23.8 Implement `GET /api/cases/[id]/audit/verify`
+  - [x] 23.8 Implement `GET /api/cases/[id]/audit/verify`
     - Call `verifyAuditChain(caseId)` and return whether the Audit_Chain is intact together with the head hash (and the first broken event id when broken)
     - _Requirements: 25.4_
 
