@@ -195,7 +195,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 29.2, 29.4, 29.5**
 
 - [ ] 11. Implement the Agent_Runner nine-stage pipeline
-  - [ ] 11.1 Implement pipeline scaffolding and stage orchestration in `lib/agentRunner.ts`
+  - [-] 11.1 Implement pipeline scaffolding and stage orchestration in `lib/agentRunner.ts`
     - Define the `PipelineStage` union and a `runStage(caseId, stage, ...)` helper that runs a bounded (≤ 8 iteration) plan→tool_call→observe cycle under a stage-specific system prompt and the stage's tool allow-list, tagging every Trace_Step it writes with the stage; sequence the stages in order (Intake_And_Extraction → Medical_Review/Policy_Review → Strategy → Decision_Intelligence → Appeal_Generation → Verification_QA), persisting each iteration's Trace_Steps/Extracted_Fields before the next call
     - On loop exhaustion without a decision, force Escalate_To_Human and record a Trace_Step with reasoning "needs manual review"; when `callQwen` reports a structured `QwenFailure`, degrade the calling stage gracefully by setting the Resolution_Path to Escalate_To_Human (NeedsHumanInput) rather than terminating the run abnormally; if any stage throws, record a failure Trace_Step naming the affected stage, set Escalate_To_Human, and do not run subsequent stages
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.9, 20.1, 20.5, 20.6_
@@ -515,8 +515,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert chronological merged rendering and that all four analytics views render from `/api/analytics`
     - _Requirements: 14.2, 14.3, 14.4_
 
-- [ ] 22. Implement seed and demo reset
-  - [ ] 22.1 Build `prisma/seed.ts` and `POST /api/demo/reset`
+- [x] 22. Implement seed and demo reset
+  - [x] 22.1 Build `prisma/seed.ts` and `POST /api/demo/reset`
     - Seed ≥3 payers (each ≥2 policies), 6–8 patients (each 1–3 chart notes including a stale note, a mismatched diagnosis code, and a missing-evidence reference), 4–5 cases across statuses, and at least one case per Resolution_Path; reset re-runs the seed
     - _Requirements: 18.1, 18.2, 18.3, 18.4, 18.5_
 
@@ -555,11 +555,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 60: Tampering breaks the chain and the first broken event is identified**
     - **Validates: Requirements 25.5, 25.6**
 
-  - [ ] 23.8 Implement `GET /api/cases/[id]/audit/verify`
+  - [-] 23.8 Implement `GET /api/cases/[id]/audit/verify`
     - Call `verifyAuditChain(caseId)` and return whether the Audit_Chain is intact together with the head hash (and the first broken event id when broken)
     - _Requirements: 25.4_
 
-  - [ ] 23.9 Implement idempotency support in `lib/idempotency.ts`
+  - [x] 23.9 Implement idempotency support in `lib/idempotency.ts`
     - Implement `withIdempotency(key, operation, run)` that applies the effect and stores the result the first time a key is seen and returns the stored original result on any retry with the same key, applying the effect at most once; wired into the action route (task 15.1) for submission/approval/outcome/stage-advance
     - _Requirements: 26.1, 26.2, 26.3, 26.4, 26.5_
 
