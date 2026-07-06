@@ -1,8 +1,13 @@
 name: CI
 
-# Adapted for AuthPilot's stack (Node + Next.js + Prisma + Vitest/fast-check).
-# Single job replacing the reference project's 3 Bun jobs. Activates once the Next.js
-# app is scaffolded (package.json present — tasks.md task 1).
+# AuthPilot CI — Node + Next.js + Prisma + Vitest/fast-check.
+#
+# Runs against a DISPOSABLE PostgreSQL service (Requirement 39 / design Testing
+# Strategy): dev, test, and CI all use PostgreSQL. The schema is applied with
+# `prisma db push` (no migration history is required for an ephemeral database),
+# then the pipeline runs typecheck, lint, the test suite (unit + fast-check
+# property tests), the gold-case evaluation (scripts/eval.ts), and the
+# production build.
 
 on:
   push:
@@ -21,50 +26,62 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+
+    # Disposable PostgreSQL for the whole job. Exposed on localhost:5432.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: authpilot
+          POSTGRES_PASSWORD: authpilot
+          POSTGRES_DB: authpilot
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U authpilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Point Prisma / the app at the disposable PostgreSQL service.
+      DATABASE_URL: postgresql://authpilot:authpilot@localhost:5432/authpilot
+      # Minimal required App_Configuration so boot-time validation (Req 38) and
+      # the production build pass. These are throwaway CI values, not secrets;
+      # the WhatsApp and Sarvam optional groups are intentionally left unset.
+      QWEN_API_KEY: ci-dummy-key
+      QWEN_API_BASE: https://example.com/compatible-mode/v1
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Skip if app not scaffolded yet
-        id: guard
-        run: |
-          if [ -f package.json ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No package.json yet — AuthPilot app not scaffolded; skipping build/test."
-          fi
-
       - name: Setup Node
-        if: steps.guard.outputs.ready == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
       - name: Install
-        if: steps.guard.outputs.ready == 'true'
+        # `postinstall` runs `prisma generate`, so the client is available here.
         run: npm ci
 
       - name: Prisma generate
-        if: steps.guard.outputs.ready == 'true'
         run: npx prisma generate
 
+      - name: Apply schema to disposable PostgreSQL
+        run: npx prisma db push --skip-generate
+
       - name: Typecheck
-        if: steps.guard.outputs.ready == 'true'
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
       - name: Lint
-        if: steps.guard.outputs.ready == 'true'
         run: npm run lint --if-present
 
       - name: Test (unit + property-based)
-        if: steps.guard.outputs.ready == 'true'
-        run: npm test --if-present
+        run: npm test
 
       - name: Gold-case evaluation
-        if: steps.guard.outputs.ready == 'true'
-        run: npm run eval --if-present
+        run: npm run eval
 
       - name: Build
-        if: steps.guard.outputs.ready == 'true'
-        run: npm run build --if-present
+        run: npm run build

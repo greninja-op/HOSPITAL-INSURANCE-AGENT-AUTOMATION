@@ -1,12 +1,16 @@
 # AuthPilot — local development stack.
 #
-# Primary use: the OPTIONAL Postgres switch. By default AuthPilot runs on SQLite with no
-# containers at all (just `npm run dev`). Bring up Postgres only when you want to exercise
-# the Postgres path:
+# PostgreSQL is AuthPilot's datasource for dev, test, and CI (Requirement 39). Bring the
+# database up with:
 #
 #   docker compose up -d postgres
-#   # then set DATABASE_URL=postgresql://authpilot:authpilot@localhost:5433/authpilot
-#   # and change the Prisma datasource provider to "postgresql", then `npx prisma migrate dev`
+#   # DATABASE_URL=postgresql://authpilot:authpilot@localhost:5433/authpilot
+#   npx prisma db push          # apply the schema (or `prisma migrate dev`)
+#   npm run dev
+#
+# Portability is preserved at the Prisma level: because AuthPilot uses no provider-specific
+# constructs, DATABASE_URL can be repointed at any Prisma-supported engine that supports the
+# Json type with no application-logic change (Requirement 39.2).
 #
 # The `app` service is optional and only needed for self-hosted parity (Vercel needs no
 # container). Uncomment to run the whole thing in Docker.

@@ -42,6 +42,8 @@
 // fills a seam, it does so by calling the `runStage` engine below.
 // =============================================================================
 
+import { Prisma } from "@prisma/client";
+
 import { callQwen, type ChatMessage, type ToolSchema } from "./qwen";
 import {
   dispatchTool,
@@ -57,6 +59,8 @@ import type {
   QwenFailure,
   ResolutionPath,
   StepType,
+  StrategyOption,
+  StrategyOptions,
 } from "./types";
 
 // Re-export so downstream stage tasks and tests import the stage union from the
@@ -1017,9 +1021,278 @@ async function policyReviewStage(
   return runReviewStage(ctx, stage, plan);
 }
 
-/** SEAM — Task 11.9 fills win-probability strategy options over prior-auth history. */
-function strategyStage(ctx: StageContext): Promise<StageSummary> {
-  return runStageSeam(ctx, "Strategy", "11.9");
+// ─── Strategy stage body (Task 11.9) ──────────────────────────────────────────
+//
+// Scoped to `checkPriorAuthHistory` + `fetchPayerPolicy` (Req 17.3, 20.11 — no
+// new tools). The stage invokes `checkPriorAuthHistory(patientId)` for the
+// patient's seeded case history (Req 21.1) and may consult `fetchPayerPolicy`
+// so multi-payer policy diffing informs the estimate (Req 17.3). From the
+// history + the payer-specific track record the model proposes 1..5 candidate
+// appeal approaches, each with an INTEGER win-probability 0..100 (Req 21.2).
+// When the history is empty or the tool fails, the stage falls back to the
+// payer track record only and records `usedPriorAuthHistory: false` (Req 21.3).
+// The approaches are persisted on `Case.strategyOptions` ordered by DESCENDING
+// win-probability (Req 21.4, 23.1), a `stepType: "strategy"` Trace_Step is
+// written (Req 20.9), and the Strategy_Options summary is carried forward on the
+// stage summary's `note` for Decision_Intelligence (Req 21.5).
+
+/** The upper bound on candidate appeal approaches (1..5, Req 21.2). */
+const STRATEGY_MAX_OPTIONS = 5;
+
+/** What the Strategy stage's `finalize` hands back: parsed options + transcript. */
+interface StrategyStageData {
+  options: StrategyOption[];
+  payerTrackRecordSummary: string;
+  observations: ToolObservation[];
+}
+
+/** Used when the model produced no usable candidate approach (keeps min 1, Req 21.2). */
+const FALLBACK_STRATEGY_OPTION: StrategyOption = {
+  approach: "Escalate for manual strategy review",
+  winProbability: 0,
+  rationale:
+    "The Strategy stage could not derive candidate approaches from the available prior-auth history or payer track record.",
+};
+
+const STRATEGY_SYSTEM_PROMPT = [
+  "You are the Strategy stage of the AuthPilot prior-authorization agent.",
+  "Your job is to weigh candidate appeal approaches by their likelihood of success.",
+  "",
+  "First, call checkPriorAuthHistory(patientId) to obtain the patient's seeded prior-auth case",
+  "history. You may also call fetchPayerPolicy(payerId, procedureCode) to review the payer's",
+  "medical-necessity criteria and inform multi-payer policy diffing. These are your only tools.",
+  "",
+  "Using the prior-auth history and the payer-specific track record (how this payer has resolved",
+  "similar past cases), identify between ONE and FIVE candidate appeal approaches. For EACH approach",
+  "estimate a win-probability as an INTEGER from 0 to 100 (percent). If no prior-auth history is",
+  "available, base your estimates on the payer track record alone.",
+  "",
+  "Reply with ONLY a single JSON object (no prose, no code fence) of the exact shape:",
+  '{"options":[{"approach":string,"winProbability":number 0..100,"rationale":string}],',
+  '"payerTrackRecordSummary":string}',
+  "Provide between 1 and 5 options.",
+].join("\n");
+
+/** Build the Strategy user prompt from the resolved Case context. */
+function buildStrategyUserPrompt(rc: ReviewContext): string {
+  const lines: string[] = [];
+  if (rc.patientId) {
+    lines.push(
+      `Linked patientId: ${rc.patientId}. Call checkPriorAuthHistory with this id to obtain the seeded prior-auth case history.`,
+    );
+  } else {
+    lines.push(
+      "No patient is linked to this Case, so prior-auth history is unavailable; base your estimates on the payer track record alone.",
+    );
+  }
+  if (rc.payerId && rc.procedureCode) {
+    lines.push(
+      `Payer: ${rc.payerName ?? rc.payerId} (payerId: ${rc.payerId}). You may call fetchPayerPolicy with payerId "${rc.payerId}" and procedureCode "${rc.procedureCode}" to inform multi-payer policy diffing.`,
+    );
+  }
+  lines.push(
+    `Requested procedure code: ${rc.procedureCode ?? "unknown"}.`,
+    `Diagnosis code: ${rc.diagnosisCode ?? "unknown"}.`,
+    `Stated denial reason: ${rc.denialReason ?? "unknown"}.`,
+    "",
+    "Return 1..5 candidate appeal approaches, each with an integer win-probability (0..100); they will be sorted by descending win-probability.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Coerce a model-supplied win-probability into an INTEGER 0..100 (Req 21.2).
+ * A 0..1 fraction is accepted as a percent; everything else is rounded and
+ * clamped into range.
+ */
+function normalizeWinProbability(raw: unknown): number {
+  if (typeof raw !== "number" || Number.isNaN(raw)) return 0;
+  const scaled = raw > 0 && raw < 1 ? raw * 100 : raw;
+  const rounded = Math.round(scaled);
+  if (rounded < 0) return 0;
+  if (rounded > 100) return 100;
+  return rounded;
+}
+
+/** Normalise one raw option object into a `StrategyOption`, or null when unusable. */
+function normalizeStrategyOption(raw: unknown): StrategyOption | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const rec = raw as Record<string, unknown>;
+  const approach = typeof rec.approach === "string" ? rec.approach.trim() : "";
+  if (approach === "") return null;
+  const rationale =
+    typeof rec.rationale === "string" && rec.rationale.trim() !== ""
+      ? rec.rationale.trim()
+      : "No rationale provided.";
+  return {
+    approach,
+    winProbability: normalizeWinProbability(rec.winProbability),
+    rationale,
+  };
+}
+
+/**
+ * Parse the model's final content into candidate options + the payer
+ * track-record summary. Tolerates markdown fences and prose; unusable output
+ * yields no options (the caller substitutes the fallback so min-1 holds).
+ */
+function parseStrategyOutput(content: string | null): {
+  options: StrategyOption[];
+  payerTrackRecordSummary: string;
+} {
+  let parsed: Record<string, unknown> = {};
+  if (typeof content === "string" && content.trim() !== "") {
+    const stripped = content
+      .replace(/^\s*```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/i, "")
+      .trim();
+    const start = stripped.indexOf("{");
+    const end = stripped.lastIndexOf("}");
+    const candidate =
+      start !== -1 && end !== -1 && end > start
+        ? stripped.slice(start, end + 1)
+        : stripped;
+    try {
+      const obj = JSON.parse(candidate);
+      if (typeof obj === "object" && obj !== null) {
+        parsed = obj as Record<string, unknown>;
+      }
+    } catch {
+      // Unparseable — no options; caller supplies the fallback.
+    }
+  }
+
+  const rawOptions = Array.isArray(parsed.options) ? parsed.options : [];
+  const options = rawOptions
+    .map(normalizeStrategyOption)
+    .filter((opt): opt is StrategyOption => opt !== null);
+
+  const payerTrackRecordSummary =
+    typeof parsed.payerTrackRecordSummary === "string" &&
+    parsed.payerTrackRecordSummary.trim() !== ""
+      ? parsed.payerTrackRecordSummary.trim()
+      : "";
+
+  return { options, payerTrackRecordSummary };
+}
+
+/**
+ * True when a successful `checkPriorAuthHistory` observation returned a
+ * non-empty case history — the condition under which the estimate used seeded
+ * prior-auth history (rather than the payer-track-record-only fallback, Req 21.3).
+ */
+function priorAuthHistoryAvailable(observations: ToolObservation[]): boolean {
+  return observations.some(
+    (obs) =>
+      obs.ok &&
+      obs.tool === "checkPriorAuthHistory" &&
+      Array.isArray(obs.result) &&
+      obs.result.length > 0,
+  );
+}
+
+/**
+ * Strategy stage body (Task 11.9) — scoped to `checkPriorAuthHistory` +
+ * `fetchPayerPolicy` (Req 17.3). Computes 1..5 win-probability-ranked candidate
+ * approaches from prior-auth history + payer track record (Req 21.1, 21.2),
+ * falling back to payer track record only when history is empty/unavailable
+ * (Req 21.3); persists `Case.strategyOptions` ordered by descending
+ * win-probability (Req 21.4, 23.1) and writes a `strategy` Trace_Step (Req 20.9)
+ * whose summary is consumed by Decision_Intelligence (Req 21.5).
+ */
+async function strategyStage(
+  ctx: StageContext,
+): Promise<StageOutcome<StageSummary>> {
+  const stage = "Strategy" as const;
+  const rc = await loadReviewContext(ctx.caseId);
+
+  const plan: StagePlan<StrategyStageData> = {
+    stage,
+    systemPrompt: STRATEGY_SYSTEM_PROMPT,
+    userPrompt: buildStrategyUserPrompt(rc),
+    finalize: ({ content, observations }) => {
+      const { options, payerTrackRecordSummary } = parseStrategyOutput(content);
+      return { options, payerTrackRecordSummary, observations };
+    },
+  };
+
+  const outcome = await runStage<StrategyStageData>(ctx.caseId, plan);
+
+  // Propagate a Qwen degrade (Req 6.9) or loop exhaustion (Req 6.4) unchanged.
+  if (outcome.status === "degraded") {
+    return {
+      status: "degraded",
+      failure: outcome.failure,
+      iterations: outcome.iterations,
+    };
+  }
+  if (outcome.status === "exhausted") {
+    return {
+      status: "exhausted",
+      observations: outcome.observations,
+      iterations: outcome.iterations,
+    };
+  }
+
+  const { options, payerTrackRecordSummary, observations } = outcome.summary;
+
+  // Req 21.3 — history is used only when the tool returned a non-empty history;
+  // otherwise the estimate falls back to the payer track record only.
+  const usedPriorAuthHistory = priorAuthHistoryAvailable(observations);
+
+  // Req 21.2 — keep 1..5 options; Req 21.4 / 23.1 — order by DESCENDING
+  // win-probability. Substitute the fallback when the model produced none.
+  const ranked = (options.length > 0 ? options : [FALLBACK_STRATEGY_OPTION])
+    .slice()
+    .sort((a, b) => b.winProbability - a.winProbability)
+    .slice(0, STRATEGY_MAX_OPTIONS);
+
+  const strategyOptions: StrategyOptions = {
+    options: ranked,
+    usedPriorAuthHistory,
+    payerTrackRecordSummary:
+      payerTrackRecordSummary !== ""
+        ? payerTrackRecordSummary
+        : usedPriorAuthHistory
+          ? "Payer track record derived from the patient's seeded prior-auth history."
+          : "No prior-auth history was available; payer track record could not be summarized from history.",
+  };
+
+  // Req 23.1 — persist Strategy_Options on the Case as a structured JSON field,
+  // retrievable independently of the recommendation.
+  await prisma.case.update({
+    where: { id: ctx.caseId },
+    data: {
+      strategyOptions: strategyOptions as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  // Req 20.9 / 20.5 — the stage's single labeled `strategy` Trace_Step, carrying
+  // the Strategy_Options summary consumed downstream by Decision_Intelligence
+  // (Req 21.5).
+  const top = ranked[0];
+  const note =
+    `[${stage}] Computed ${ranked.length} candidate approach(es) (Req 21.2); ` +
+    `top "${top.approach}" at ${top.winProbability}% win-probability. ` +
+    (usedPriorAuthHistory
+      ? "Used seeded prior-auth history + payer track record."
+      : "Prior-auth history unavailable; used payer track record only (Req 21.3).");
+
+  await createTraceStep({
+    caseId: ctx.caseId,
+    stepType: STAGE_STEP_TYPE[stage],
+    reasoning: note,
+    output: {
+      strategyOptions: strategyOptions as unknown as Prisma.InputJsonValue,
+      toolCalls: observations.map((obs) => ({ tool: obs.tool, ok: obs.ok })),
+    },
+  });
+
+  return {
+    status: "completed",
+    summary: { stage, note },
+    iterations: outcome.iterations,
+  };
 }
 
 /** SEAM — Task 11.13 fills the pure Decision_Engine call + decision persistence. */

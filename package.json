@@ -12,7 +12,10 @@
     "test:watch": "vitest",
     "eval": "tsx scripts/eval.ts",
     "prisma:generate": "prisma generate",
-    "prisma:seed": "tsx prisma/seed.ts"
+    "prisma:seed": "tsx prisma/seed.ts",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate deploy",
+    "postinstall": "prisma generate"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

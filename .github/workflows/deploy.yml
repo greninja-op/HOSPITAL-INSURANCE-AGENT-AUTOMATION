@@ -4,6 +4,12 @@ name: Deploy
 # (auto-deploy on push to main) — in that case this workflow is optional. It is provided
 # for teams that prefer an explicit, CI-gated deploy via the Vercel CLI.
 #
+# Datasource is PostgreSQL (Requirement 39). `prisma generate` runs automatically via the
+# `postinstall` script on every install (locally, in CI, and during the Vercel build), so
+# the Prisma client is always present. Apply schema changes to the production database with
+# `npm run db:migrate` (prisma migrate deploy) once a migration history exists, or wire it
+# into the Vercel build command.
+#
 # Runs only after CI succeeds on main. Requires repo secrets:
 #   VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID
 #

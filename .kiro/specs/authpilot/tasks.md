@@ -231,7 +231,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 37: Medical and Policy reviews overlap**
     - **Validates: Requirements 20.2**
 
-  - [~] 11.9 Implement the Strategy stage
+  - [x] 11.9 Implement the Strategy stage
     - Invoke `checkPriorAuthHistory(patientId)` and use payer-specific track record plus multi-payer policy diffing as an input; compute 1–5 candidate approaches each with an integer win-probability (0–100); when history is empty or the tool fails, fall back to payer track record only and set `usedPriorAuthHistory: false`; store `strategyOptions` ordered by descending win-probability; write `stepType: "strategy"`; provide the Strategy_Options summary to Decision_Intelligence
     - _Requirements: 17.3, 20.9, 21.1, 21.2, 21.3, 21.4, 21.5, 23.1_
 
@@ -405,8 +405,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 50: Strategy and verification outputs persist and retrieve losslessly**
     - **Validates: Requirements 23.1, 23.2, 23.4**
 
-- [ ] 15. Implement the shared case action and human-action API
-  - [~] 15.1 Implement `POST /api/cases/[id]/action`
+- [x] 15. Implement the shared case action and human-action API
+  - [x] 15.1 Implement `POST /api/cases/[id]/action`
     - Handle Approve, Reject, Edit, and Request More Evidence by **delegating to the shared `performCaseAction(caseId, actionType, meta)` operation** (`lib/caseActions.ts`, task 15.10) with `meta.source: "dashboard"` — the route contains no case-action logic of its own and is not the writer of the `human_action` Trace_Step; map the structured `CaseActionResult` to the HTTP response (never mark sent without a recorded Approve; 400 on malformed payloads)
     - Also handle the two Case_Outcome action types for Cases in status `AppealSent`: `appeal_won` → `Resolved` and `appeal_denied` → `DeniedFinal`, setting `Case.resolvedAt` to the processing timestamp and recording a `human_action` Trace_Step describing the outcome
     - Reject any Case_Outcome action when the Case status is not `AppealSent`, leaving status and `resolvedAt` unchanged, recording no Trace_Step, and returning a message identifying that the Case must be in status `AppealSent`
@@ -631,7 +631,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 72: Closed-window fallback re-attempts at most once**
     - **Validates: Requirements 33.5, 33.6**
 
-  - [~] 26.11 Implement role-based routing in `lib/whatsapp/router.ts`
+  - [x] 26.11 Implement role-based routing in `lib/whatsapp/router.ts`
     - Implement `resolveRole(phone, staffNumbers)` (registered `Staff_Number` ⇒ staff, else patient), `parseStaffCommand(text)` (total parser for `Approve`/`Reject`/`Status`/`Show`, non-commands → `{ kind: "none" }`), the generic PHI-free `PATIENT_TEMPLATES` set (including `needsMoreInfo` that never names the missing item), and `routeInbound(inbound, ports)` over injected `RouterPorts` (including the `performCaseAction`, `classifyMedia`, `detectEmergency`, `recordHandoff`, and `conversationalFallback` ports used by tasks 26.22–26.35)
     - Patient intake (free text or denial-letter image) → screen the text through the `Safety_Guard`, create a Case with `intakeType: "whatsapp_patient_note"` storing the message/extracted text as raw Intake, run the normal nine-stage pipeline, and reply with the `caseCreated` acknowledgement template; patient status question → look up the most recent open Case by phone and reply with a generic `statusGeneric` template (or `noOpenCase`) without re-running the pipeline
     - Staff command from a registered `Staff_Number` → `Approve`/`Reject` perform the same `Human_Action` as the dashboard by **delegating to the shared `performCaseAction` operation** (`lib/caseActions.ts`, task 15.10) via the injected `performCaseAction` port with `meta.source: "whatsapp"` — the same implementation the Dashboard invokes, never a channel-local copy — which itself applies the status change through `assertTransition` and `withIdempotency`; `Status`/`Show` reply with a one-line summary / Case Detail link and mutate nothing; a non-staff action command is rejected without changing any Case
@@ -743,8 +743,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert a submitted transcript becomes a `phone_note` intake that runs the normal pipeline and that no telephony / real-time-media module is required (37.2 is smoke-tested, not a numbered property)
     - _Requirements: 37.1, 37.2_
 
-- [ ] 28. Wire CI, deployment, and configuration operations
-  - [~] 28.1 Wire CI, deploy config, portability, and boot-time config validation
+- [x] 28. Wire CI, deployment, and configuration operations
+  - [x] 28.1 Wire CI, deploy config, portability, and boot-time config validation
     - Configure CI to run typecheck, lint, tests (including the fast-check property tests) and the gold-eval, and the build; add Vercel deploy configuration; provide an optional Postgres `docker-compose` plus the documented single provider + `DATABASE_URL` switch (no logic change); add `.env.example` enumerating the required and WhatsApp configuration keys; invoke `loadConfig` at boot so configuration is validated fail-fast
     - _Requirements: 38.1, 38.2, 38.3, 38.4, 39.1, 39.2_
 
