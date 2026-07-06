@@ -247,7 +247,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 45: Strategy fallback when history is unavailable**
     - **Validates: Requirements 21.3**
 
-  - [~] 11.13 Implement the Decision_Intelligence stage
+  - [x] 11.13 Implement the Decision_Intelligence stage
     - Call the pure `decide()` over the Medical_Review, Policy_Review, and Strategy summaries (not raw documents), passing `contradictionCount = blockingCount(findings)` so routing is driven only by blocking Findings while `warning` findings are surfaced to the reviewer without forcing escalation; persist a `decision` Trace_Step storing overall confidence, path, and reasoning; on Auto_Draft/Draft_And_Request_Evidence set AwaitingApproval (recording requested evidence for the medium path) and on Escalate_To_Human set NeedsHumanInput, performing each Case_Status change through `assertTransition` (`lib/caseStatus.ts`)
     - _Requirements: 5.2, 5.6, 5.7, 5.8, 5.9, 28.1, 29.4, 29.5_
 
@@ -675,7 +675,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - [ ]* 26.21 Write optional smoke test for the setup script
     - Assert the setup script runs against fakes without error and is a one-shot (no runtime dependency in the request path)
 
-  - [~] 26.22 Implement the media quality gate in `lib/whatsapp/mediaGate.ts`
+  - [x] 26.22 Implement the media quality gate in `lib/whatsapp/mediaGate.ts`
     - Implement `classifyMedia(files)` returning a `MediaQualityResult` per file (`usable`, and when not usable a `reason` of `blurry`/`too_dark`/`cropped`/`not_a_document`/`wrong_document_type`, and when usable the `extractedText`); fail-safe so any thrown error in the check/extraction yields `{ usable: false }` and extraction results are not used; wire the classify → route decision into `router.ts` **before any intake**: usable → route the extracted text through the same intake path as an inbound text message; unusable → reply with corrective guidance specific to the reason and create **no Case**; when multiple media files arrive in one delivery, use the relevant document(s) and disregard clearly unrelated files
     - _Requirements: 41.1, 41.2, 41.3, 41.4, 41.5, 41.6, 32.6_
 
@@ -688,7 +688,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Extract text from a sample clear image/PDF and assert non-empty extracted text is produced for a usable file; OCR/PDF extraction is I/O- and library-bound, so its correctness is covered by an integration/example test rather than a property test
     - _Requirements: 41.4_
 
-  - [~] 26.25 Implement the emergency short-circuit in `lib/whatsapp/emergency.ts`
+  - [x] 26.25 Implement the emergency short-circuit in `lib/whatsapp/emergency.ts`
     - Implement the deterministic, **non-LLM** `detectEmergency(text)` matching a fixed set of emergency-language patterns (chest pain, difficulty breathing, severe bleeding, stroke, overdose, suicidal statements) with plain string/regex rules; wire it **FIRST** in the patient path in `router.ts` so on a match AuthPilot replies with the emergency-care template directing the patient to call 911 / go to the ER, raises an **urgent** `Handoff_Request` (task 26.27), and short-circuits — no Case is created or mutated and no later rule runs
     - _Requirements: 42.1, 42.2, 42.3, 42.4, 43.2_
 
@@ -697,7 +697,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert `detectEmergency` is deterministic with no model call, and for any text it flags as emergency the router replies with the emergency template, records an urgent `Handoff_Request`, and creates/mutates no Case
     - **Validates: Requirements 42.1, 42.2, 42.3, 42.4, 43.2**
 
-  - [~] 26.27 Implement human handoff in `lib/whatsapp/handoff.ts`
+  - [x] 26.27 Implement human handoff in `lib/whatsapp/handoff.ts`
     - Implement `recordHandoff(req)` persisting a `HandoffRequest` row (patient phone, optional linked Case, reason, urgent flag) and broadcasting a staff notification identifying the handoff, flagged **urgent** when `req.urgent` is set; wire the router so an explicit patient request for a human raises a **non-urgent** handoff and an emergency (task 26.25) raises an **urgent** one
     - _Requirements: 43.1, 43.2, 43.3, 43.4_
 
@@ -705,7 +705,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert an explicit patient human-request records a non-urgent `HandoffRequest` and a staff notification, and an emergency-driven handoff records an urgent `HandoffRequest` whose staff notification is flagged urgent
     - _Requirements: 43.3, 43.4_
 
-  - [~] 26.29 Implement the conversational fallback in `lib/whatsapp/fallback.ts`
+  - [x] 26.29 Implement the conversational fallback in `lib/whatsapp/fallback.ts`
     - Implement `conversationalFallback(input)` producing a scoped reply under a role-specific system prompt: patient scope MAY explain general concepts/process/timelines, acknowledge frustration, and ask a clarifying question, and MUST NOT state any specific denial reason/diagnosis/procedure code/dollar amount/policy detail, MUST NOT give medical advice (redirect medical questions to the patient's physician), and MUST NOT promise an outcome; staff scope MAY explain a Case's decision reasoning/status/thresholds, and MUST NOT perform any case action from free text or guess a case id; wire it in `router.ts` as the **last resort** for any inbound that matches neither a structured staff command, a clear new-case trigger, nor a status query
     - _Requirements: 44.1, 44.2, 44.3, 44.4, 44.5, 44.6, 44.7, 32.7, 34.10_
 

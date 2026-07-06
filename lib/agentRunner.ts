@@ -53,8 +53,11 @@ import {
 import { createTraceStep, prisma } from "./db";
 import { screenUntrusted } from "./guard";
 import { assertTransition } from "./caseStatus";
+import { computeOverallConfidence, decide } from "./decisionEngine";
+import { blockingCount, gapFinding, warningFindings } from "./findings";
 import type {
   CaseStatus,
+  Finding,
   PipelineStage,
   QwenFailure,
   ResolutionPath,
@@ -1295,9 +1298,207 @@ async function strategyStage(
   };
 }
 
-/** SEAM — Task 11.13 fills the pure Decision_Engine call + decision persistence. */
-function decisionIntelligenceStage(ctx: StageContext): Promise<StageSummary> {
-  return runStageSeam(ctx, "Decision_Intelligence", "11.13");
+// ─── Decision_Intelligence stage body (Task 11.13) ────────────────────────────
+//
+// PURE reasoning over the Medical_Review, Policy_Review, and Strategy SUMMARIES
+// already carried on `ctx.summaries` — never over the raw source documents
+// (Req 5.2). The stage's tool allow-list is empty
+// (STAGE_TOOL_ALLOWLIST.Decision_Intelligence === []), so there is NO Qwen tool
+// loop: the deterministic `Decision_Engine` is called directly and the single
+// stage-labeled `decision` Trace_Step is written by hand.
+//
+// Flow:
+//   • Aggregate the Case's Extracted_Field confidences into an overall
+//     Confidence_Score 0..100 via `computeOverallConfidence` (Req 5.1).
+//   • Assemble the Findings surfaced so far (contradiction / gap / policy /
+//     verification) via lib/findings.ts and feed `blockingCount(findings)` as
+//     the Decision_Engine's `contradictionCount`, so routing to escalation is
+//     driven ONLY by blocking findings; warning findings are surfaced but never
+//     force escalation on their own (Req 29.4, 29.5).
+//   • Call the pure `decide(...)` (Req 5.3–5.5, 4.4) and persist a `decision`
+//     Trace_Step storing the overall Confidence_Score, the selected
+//     Resolution_Path, and the reasoning (Req 5.6).
+//   • Persist Case.resolutionPath + Case.overallConfidence and move the
+//     Case_Status through the guarded state machine (Req 28.1): AwaitingApproval
+//     for the two drafting paths (recording `requestedEvidence` for the medium
+//     path — Req 5.7 / 5.8), NeedsHumanInput for escalation (Req 5.9).
+
+/** Human-friendly label for each intake field, used in requestedEvidence text. */
+const INTAKE_FIELD_LABEL: Record<string, string> = {
+  [INTAKE_FIELD_NAMES.patient]: "patient identity",
+  [INTAKE_FIELD_NAMES.payer]: "payer identity",
+  [INTAKE_FIELD_NAMES.procedureCode]: "procedure (CPT) code",
+  [INTAKE_FIELD_NAMES.diagnosisCode]: "diagnosis (ICD-10-CM) code",
+  [INTAKE_FIELD_NAMES.denialReason]: "denial reason",
+};
+
+/**
+ * Scale a stored Extracted_Field confidence into a 0..100 Confidence_Score.
+ * Intake persists confidences in the 0..1 range; the Decision_Engine reasons in
+ * 0..100 percent (Req 5.1), so a 0..1 reading is scaled up while an already-
+ * percent reading is passed through.
+ */
+function toConfidencePercent(raw: number): number {
+  if (!Number.isFinite(raw)) return 0;
+  return raw <= 1 ? raw * 100 : raw;
+}
+
+/**
+ * Assemble the Findings surfaced for the Case so far, for the Decision_Engine.
+ *
+ * Each Extracted_Field that could not be resolved (value "unknown" / confidence
+ * 0) is surfaced as a WARNING-severity gap Finding (missing intake evidence): it
+ * is shown to the reviewer and drives the medium-path `requestedEvidence` list,
+ * but — being non-blocking — never on its own forces escalation (Req 29.5).
+ * Routing to Escalate_To_Human depends only on blocking Findings (Req 29.4);
+ * contradiction / policy / verification blocking Findings surfaced by upstream
+ * detection would appear here and raise `blockingCount`.
+ */
+function collectDecisionFindings(
+  caseId: string,
+  fields: { fieldName: string; value: string; confidence: number }[],
+): Finding[] {
+  const findings: Finding[] = [];
+  for (const field of fields) {
+    if (isUnknownValue(field.value) || field.confidence <= 0) {
+      const label = INTAKE_FIELD_LABEL[field.fieldName] ?? field.fieldName;
+      findings.push(
+        gapFinding({
+          caseId,
+          slug: `unresolved-${field.fieldName}`,
+          severity: "warning",
+          technicalMessage: `Extracted_Field "${field.fieldName}" was not resolved (value="${field.value}", confidence=${field.confidence}).`,
+          friendlyMessage: `The ${label} could not be determined from the submitted documents.`,
+        }),
+      );
+    }
+  }
+  return findings;
+}
+
+/**
+ * Decision_Intelligence stage body (Task 11.13) — pure reasoning over the
+ * Medical/Policy/Strategy summaries (Req 5.2). Aggregates the overall
+ * Confidence_Score (Req 5.1), routes via the deterministic `Decision_Engine`
+ * with `contradictionCount` = blocking-finding count (Req 29.4, 29.5), writes
+ * the single `decision` Trace_Step (Req 5.6), and persists the Resolution_Path,
+ * overall confidence, and the guarded Case_Status transition (Req 5.7–5.9, 28.1).
+ */
+async function decisionIntelligenceStage(
+  ctx: StageContext,
+): Promise<StageOutcome<StageSummary>> {
+  const stage = "Decision_Intelligence" as const;
+
+  const kase = await prisma.case.findUnique({
+    where: { id: ctx.caseId },
+    select: { status: true },
+  });
+  if (!kase) {
+    throw new Error(`Decision_Intelligence: Case "${ctx.caseId}" not found.`);
+  }
+
+  const fields = await prisma.extractedField.findMany({
+    where: { caseId: ctx.caseId },
+    select: { fieldName: true, value: true, confidence: true },
+  });
+
+  // Req 5.1 — aggregate per-field confidences into an overall 0..100 score.
+  const overallConfidence = computeOverallConfidence(
+    fields.map((f) => toConfidencePercent(f.confidence)),
+  );
+
+  // Req 29.4 / 29.5 — routing is driven ONLY by blocking findings; warnings are
+  // surfaced (below) but never force escalation on their own.
+  const findings = collectDecisionFindings(ctx.caseId, fields);
+  const contradictionCount = blockingCount(findings);
+  const warnings = warningFindings(findings);
+
+  // Req 5.2 — the decision derives from the Medical/Policy/Strategy SUMMARIES
+  // (carried on ctx.summaries and reflected in the reasoning), not raw docs.
+  const consumedSummaries = (
+    ["Medical_Review", "Policy_Review", "Strategy"] as const
+  )
+    .map((s) => ctx.summaries[s]?.note)
+    .filter((n): n is string => typeof n === "string" && n.trim() !== "");
+
+  // Req 5.3–5.5 / 4.4 — the pure, deterministic routing decision. This stage
+  // runs no loop, so iterationsExhausted is false.
+  const decision = decide({
+    overallConfidence,
+    contradictionCount,
+    iterationsExhausted: false,
+  });
+
+  // Req 5.8 — the specific additional evidence requested on the medium path,
+  // derived from the warning gap findings (the unresolved intake fields).
+  const requestedEvidenceItems = warnings
+    .filter((f) => f.kind === "gap")
+    .map((f) => f.friendlyMessage);
+
+  const reasoning =
+    `[${stage}] Decision_Engine over the Medical_Review, Policy_Review, and Strategy ` +
+    `summaries (not raw documents — Req 5.2): overall Confidence_Score ` +
+    `${overallConfidence.toFixed(1)}/100, ${contradictionCount} blocking finding(s), ` +
+    `${warnings.length} warning(s) → Resolution_Path ${decision.path} ` +
+    `(Case_Status ${decision.status}).`;
+
+  // Req 5.6 — the single stage-labeled `decision` Trace_Step (Req 20.5).
+  await createTraceStep({
+    caseId: ctx.caseId,
+    stepType: STAGE_STEP_TYPE[stage],
+    reasoning,
+    output: {
+      overallConfidence,
+      resolutionPath: decision.path,
+      status: decision.status,
+      contradictionCount,
+      findings: findings.map((f) => ({
+        findingId: f.findingId,
+        kind: f.kind,
+        severity: f.severity,
+      })),
+      requestedEvidence: requestedEvidenceItems,
+      consumedSummaries,
+    },
+  });
+
+  // Req 28.1 — move the Case_Status through the guarded state machine. The
+  // Decision_Engine already derives the target status from the path
+  // (AwaitingApproval for both drafting paths, NeedsHumanInput for escalation —
+  // Req 5.7 / 5.8 / 5.9); apply it only when the transition is legal.
+  const from = kase.status as CaseStatus;
+  const transition = assertTransition(from, decision.status);
+
+  const data: {
+    resolutionPath: ResolutionPath;
+    overallConfidence: number;
+    status?: CaseStatus;
+    requestedEvidence?: string;
+  } = {
+    resolutionPath: decision.path,
+    overallConfidence,
+  };
+  if (transition.ok && !transition.noop) {
+    data.status = decision.status;
+  }
+  // Req 5.8 — record the specific additional evidence requested for the medium path.
+  if (decision.path === "Draft_And_Request_Evidence") {
+    data.requestedEvidence =
+      requestedEvidenceItems.length > 0
+        ? requestedEvidenceItems.join("; ")
+        : "Additional supporting documentation to strengthen the appeal.";
+  }
+  await prisma.case.update({ where: { id: ctx.caseId }, data });
+
+  const note =
+    `[${stage}] ${decision.path} at ${overallConfidence.toFixed(1)}% confidence, ` +
+    `${contradictionCount} blocking finding(s) → Case_Status ${transition.status}.`;
+
+  return {
+    status: "completed",
+    summary: { stage, note },
+    iterations: 1,
+  };
 }
 
 /** SEAM — Task 11.15 fills conditional appeal-PDF generation on drafting paths. */
