@@ -553,6 +553,55 @@ async function runGoldCases(cases: GoldCase[]): Promise<GoldCaseResult[]>;
 
 Fixtures live under `eval/gold/*.json`; `scripts/eval.ts` (also runnable as a test) loads them, executes each through the runner against deterministic fakes, and reports per-case pass/fail (Req 30.2, 30.3). A `Gold_Case` passes only when the produced `Resolution_Path` **and** the produced triggering `Finding` id(s) equal the expected values; any mismatch is a fail (Req 30.4). CI can gate on `runGoldCases` returning all-pass so a decision-logic regression that breaks a known case is caught automatically.
 
+### Shared Case Action (`lib/caseActions.ts`)
+
+`performCaseAction` is the **single** implementation of the four operator actions — approve, reject, edit, and request_more_evidence — invoked by **both** the Dashboard action route (`/api/cases/[id]/action`) and the WhatsApp staff-command handler (`lib/whatsapp/router.ts`). Neither channel contains its own copy of this logic; they differ only in the `meta.source` they pass. This makes the two channels behave identically and can never drift or double-log (Requirement 40).
+
+`performCaseAction` is also the **sole writer** of the `human_action` `Trace_Step` for these four transitions, regardless of channel (Requirements 8.10, 40.3). It **never throws**: every failure — including a persistence fault — is captured and returned as a structured `CaseActionResult` with `success: false` and a human-readable `message`, so no exception ever propagates to either caller (Requirement 40.4).
+
+```typescript
+type CaseActionType = "approve" | "reject" | "edit" | "request_more_evidence";
+
+interface CaseActionMeta {
+  source: "dashboard" | "whatsapp";  // invoking channel
+  actor: string;                      // operator id / staff phone that acted
+  reason?: string;                    // rejection reason / edit note
+  editedRecommendation?: unknown;     // revised recommendation content (edit, dashboard only)
+  additionalEvidence?: string;        // supplied evidence text (request_more_evidence)
+  idempotencyKey: string;             // Idempotency_Key for the mutation (Req 26, 40.10)
+}
+
+interface CaseActionResult {
+  success: boolean;         // false on any refusal or failure — never throws (Req 40.4)
+  newStatus: CaseStatus;    // resulting status (unchanged on refusal/failure/no-op)
+  message: string;          // human-readable outcome / refusal / failure reason
+  pdfUrl?: string;          // Appeal_Packet location reference (approve only, Req 40.5)
+}
+
+// Single shared implementation invoked by BOTH the /action route and the
+// WhatsApp staff-command handler. Never throws; returns a structured result.
+async function performCaseAction(
+  caseId: string,
+  actionType: CaseActionType,
+  meta: CaseActionMeta,
+): Promise<CaseActionResult>;
+```
+
+Behavior by `actionType`:
+
+- **approve** (Requirement 40.5) — if the Case has no `appealPdfUrl`, generate the `Appeal_Packet` via `generateAppealPdf` and store its location; transition the Case to `AppealSent`; invoke the simulated `Submission_And_Tracking` step; and return the Appeal_Packet location reference as `pdfUrl`.
+- **reject** (Requirement 40.6) — transition the Case to `NeedsHumanInput` and send a staff manual-review notification on the WhatsApp_Channel.
+- **edit** — **dashboard-only**. When `meta.source === "dashboard"`, apply the edit to the Case `recommendation` and **do not** change `Case_Status` (Requirement 40.7). When `meta.source === "whatsapp"`, **refuse** the edit: return `success: false` with a message, and leave the Case `recommendation` and `Case_Status` **unchanged** (Requirement 40.8) — there is no edit path over the channel.
+- **request_more_evidence** (Requirement 40.9) — append the supplied evidence as an `Extracted_Field` with `sourceType: "human_provided"`, transition the Case to `Investigating`, and re-invoke the `Agent_Runner` pipeline as a **fire-and-forget** re-run (consistent with Requirement 16).
+
+Cross-cutting rules:
+
+- **Status changes** — every `Case_Status` change performed by `performCaseAction` is applied through `assertTransition` (Requirement 28) and wrapped in `withIdempotency(meta.idempotencyKey, …)` so a legal transition takes effect at most once across retries/redeliveries (Requirements 40.10, 26).
+- **Single human_action writer** — the `human_action` `Trace_Step` for approve/reject/edit/request_more_evidence is written here and nowhere else; the `meta.source` is recorded as the channel source (`"whatsapp"` for channel-originated actions, Requirement 8.8), so the Dashboard and WhatsApp channels can never double-log the same transition (Requirements 8.10, 40.3).
+- **No-throw contract** — the whole body runs under a guard that converts any thrown persistence/tool error into `{ success: false, newStatus: <unchanged>, message }` (Requirement 40.4).
+
+The `sourceType` enumeration for `ExtractedField` is extended with `"human_provided"` to carry evidence appended by request_more_evidence.
+
 ### WhatsApp channel (`lib/whatsapp/*`, `lib/voice/*`)
 
 The WhatsApp channel is a set of small, mostly pure `lib` modules plus one Next.js route. The route owns the request lifecycle; the `lib` modules own the logic and are individually testable. Every inbound text is screened by the `Safety_Guard` (Requirement 27) before it reaches any Qwen prompt, and every channel-originated domain action writes the same `Trace_Step` / `Audit_Chain` entries as the in-app flow (Requirements 25, 36), so the audit trail has no channel-shaped gap.
@@ -564,7 +613,7 @@ A single route handles both verbs:
 - **`GET` — verify handshake.** Compares the presented verify token against the configured token and echoes the presented challenge only when they match; otherwise rejects (Requirements 31.1, 31.2).
 - **`POST` — inbound.** The pipeline is: **capture the raw request bytes** → **HMAC verify** the `X-Hub-Signature-256` header over those exact bytes (when an app secret is configured) → **acknowledge fast (200)** → **dedupe** by inbound message id → **parse** to a `NormalizedInbound` → **route** by sender role → **reply** with a template (Requirements 31.3–31.6). Raw-body capture happens before any JSON parsing so the signature is computed over the exact transmitted bytes. The handler runs in the Node.js runtime (not edge) because it needs raw-body access and Node `crypto`.
 
-The route contains no domain logic of its own: verification lives in `signature.ts`, dedupe in `dedupe.ts`, parsing in `parseInbound.ts`, routing/decisioning in `router.ts`, and outbound in `sender.ts`. Staff approvals routed here call the **same** `Human_Action` logic the `/api/cases/[id]/action` route uses, in-process.
+The route contains no domain logic of its own: verification lives in `signature.ts`, dedupe in `dedupe.ts`, parsing in `parseInbound.ts`, routing/decisioning in `router.ts`, and outbound in `sender.ts`. Staff approvals routed here call the **same** shared `performCaseAction` operation (`lib/caseActions.ts`) the `/api/cases/[id]/action` route uses, in-process (Requirements 34.8, 40.2).
 
 #### `lib/whatsapp/signature.ts` — request authentication
 
@@ -694,10 +743,16 @@ const PATIENT_TEMPLATES = {
 } as const;
 
 interface RouterPorts {
-  createCase(input: { rawText: string; intakeType: string; patientPhone: string }): Promise<{ caseId: string }>;
-  humanAction(input: { caseId: string; action: "approve" | "reject"; source: "whatsapp"; reason?: string; idempotencyKey: string }): Promise<unknown>;
+  createCase(input: { rawText: string; intakeType: string; patientPhone: string; patientNameHint?: string }): Promise<{ caseId: string }>;
+  // Staff approve/reject delegate to the shared Shared_Case_Action (lib/caseActions.ts),
+  // the same operation the Dashboard invokes (Req 34.8, 40.2).
+  performCaseAction(caseId: string, actionType: CaseActionType, meta: CaseActionMeta): Promise<CaseActionResult>;
   lookupOpenCaseByPhone(phone: string): Promise<CaseSummary | null>;
   lookupCase(query: string): Promise<CaseSummary | null>;
+  classifyMedia(files: InboundMedia[]): Promise<MediaQualityResult[]>; // media quality gate (Req 41)
+  detectEmergency(text: string): boolean;                              // deterministic, non-LLM (Req 42.4)
+  recordHandoff(req: HandoffRequestInput): Promise<void>;              // Human_Handoff (Req 43)
+  conversationalFallback(input: FallbackInput): Promise<string>;       // scoped LLM fallback (Req 44)
   send: Sender;
   guard: (text: string) => GuardResult; // Safety_Guard (Req 27)
 }
@@ -705,18 +760,132 @@ interface RouterPorts {
 async function routeInbound(inbound: NormalizedInbound, ports: RouterPorts): Promise<void>;
 ```
 
-Routing rules:
+Routing rules are evaluated in a fixed order; the first matching rule wins and later rules do not run:
 
-- **Patient intake** (free text or denial-letter image) → screen the text through the `Safety_Guard` (Requirement 27), create a `Case` with `intakeType: "whatsapp_patient_note"`, store the message text (or text extracted from the image) as the raw Intake, run the **normal nine-stage pipeline**, and reply with the `caseCreated` acknowledgement template (Requirements 32.1–32.3). A staff new-case notification is also sent (Requirement 35.1).
-- **Patient status question** → look up the patient's most recent open Case by `Case.patientPhone` and reply with a generic, PHI-free `statusGeneric` template **without re-running the pipeline**; if no open Case exists, reply with `noOpenCase` (Requirements 32.4, 32.5). No case-specific medical detail is ever included (Requirement 33.3).
-- **Staff command** from a registered `Staff_Number` → parse with `parseStaffCommand`; `Approve`/`Reject` perform the **same `Human_Action`** as the dashboard via the injected `humanAction` port with `source: "whatsapp"`, applying the status change through `assertTransition` (Requirement 28) and `withIdempotency` (Requirement 26); `Status`/`Show` reply with a one-line summary / a Case Detail link and mutate nothing (Requirements 34.1–34.6, 8.8, 8.9).
-- **Non-staff action command** → rejected without changing any Case (Requirement 34.7).
+- **0. Emergency short-circuit (patient path, runs FIRST).** Before anything else on the patient path, inbound patient text is checked against the deterministic `Emergency_Language` detector (see Emergency short-circuit below). On a match, AuthPilot replies with the emergency-care template, raises an **urgent** `Handoff_Request`, and **short-circuits** — no Case is created or mutated and no further rule runs (Requirement 42).
+- **1. Media quality gate.** When the inbound carries an image or PDF, it is run through the media quality gate (see Media quality gate below) **before** any intake. An unusable result yields a reason-specific corrective reply and **no Case**; a usable result extracts the text and routes it through the same intake path as an inbound text message (Requirement 41).
+- **2. Patient intake** (free text or usable-media-extracted text that is a clear new-case trigger) → screen the text through the `Safety_Guard` (Requirement 27), create a `Case` with `intakeType: "whatsapp_patient_note"`, store the message text (or text extracted from the image) as the raw Intake, run the **normal nine-stage pipeline**, and reply with the `caseCreated` acknowledgement template (Requirements 32.1–32.3). A staff new-case notification is also sent (Requirement 35.1).
+- **3. Patient status question** → look up the patient's most recent open Case by `Case.patientPhone` and reply with a generic, PHI-free `statusGeneric` template **without re-running the pipeline**; if no open Case exists, reply with `noOpenCase` (Requirements 32.4, 32.5). No case-specific medical detail is ever included (Requirement 33.3).
+- **4. Staff command** from a registered `Staff_Number` → parse with `parseStaffCommand`; `Approve`/`Reject` perform the action through the shared **`performCaseAction`** operation with `meta.source: "whatsapp"` (the same implementation the Dashboard invokes, Requirements 34.8, 40.2), which itself applies the status change through `assertTransition` (Requirement 28) and `withIdempotency` (Requirement 26); `Status`/`Show` reply with a one-line summary / a Case Detail link and mutate nothing (Requirements 34.1–34.6, 8.8–8.10).
+- **5. Non-staff action command** → rejected without changing any Case (Requirement 34.7).
+- **6. Staff free-text action intent** without an exact structured command → refused with a message asking for `Approve <case-id>` / `Reject <case-id>`; **no case action** is taken (see Staff free-text action guardrail below, Requirement 45).
+- **7. Unsupported inbound type** (audio, video, location, sticker, contacts, or otherwise unrecognized) → reply asking the sender to resend as text, a photo, or a PDF; **no Case created or mutated** (Requirement 46).
+- **8. Ambiguous short patient reply** with no clear referent and no open-Case context → reply with a clarifying question; **no Case created** (Requirement 47).
+- **9. Conversational fallback.** Any inbound that matches none of a structured staff command, a clear new-case trigger, or a status query is routed to the `Conversational_Fallback` under the sender's role-scoped constraints (see Conversational fallback below, Requirements 32.7, 34.10, 44).
 
 Every patient-facing reply is drawn from `PATIENT_TEMPLATES` (generic, PHI-free), so the outbound surface is structurally incapable of carrying case specifics (Requirement 33). Every domain action taken here records the same `Trace_Step` / `Audit_Chain` entries as the in-app equivalent (Requirements 25, 36.2).
 
+#### `lib/whatsapp/mediaGate.ts` — media quality/type gate
+
+Every inbound image or PDF is run through a quality/type check **before** any extracted text is used for intake, so an unreadable file yields clear resend guidance instead of a wrongly-processed Case (Requirement 41).
+
+```typescript
+type MediaQualityReason =
+  | "blurry"
+  | "too_dark"
+  | "cropped"
+  | "not_a_document"
+  | "wrong_document_type";
+
+interface MediaQualityResult {
+  usable: boolean;
+  reason?: MediaQualityReason;   // present iff !usable (Req 41.2)
+  extractedText?: string;        // present iff usable (Req 41.4)
+}
+
+interface InboundMedia {
+  ref: string;                   // provider media handle
+  mimeType: string;
+  kind: "image" | "pdf";
+}
+
+// Fail-safe: any thrown error during check/extraction ⇒ { usable: false } (Req 41.5).
+async function classifyMedia(files: InboundMedia[]): Promise<MediaQualityResult[]>;
+```
+
+Decision flow:
+
+- **Not usable** → reply on the WhatsApp_Channel with corrective guidance **specific to the reason** (blurry → "the photo is too blurry, please resend a sharper photo", too_dark → lighting guidance, cropped → "make sure the whole page is in frame", not_a_document / wrong_document_type → "please send your denial letter as a clear photo or PDF") and **create no Case** (Requirement 41.3).
+- **Usable** → take the `extractedText` and route it through the **same intake path as an inbound text message** (Requirement 41.4). The classify → route decision is deterministic given the `MediaQualityResult`.
+- **Fail-safe** → any error in the quality check or extraction is treated as **not usable**, and extraction results are not used (Requirement 41.5).
+- **Multiple files** → when more than one media file arrives in a single delivery, the relevant document(s) are used for intake and clearly-unrelated files are disregarded (Requirement 41.6).
+
+The image/PDF text-extraction itself (OCR / PDF parsing) is I/O- and library-bound, so it is covered by integration/example tests; the classify → route decision that consumes a `MediaQualityResult` is deterministic and property-tested.
+
+#### `lib/whatsapp/emergency.ts` — emergency short-circuit (deterministic)
+
+A deterministic, **non-LLM** detector runs **first** on the patient path. It matches inbound text against a fixed set of emergency-language patterns (for example chest pain, difficulty breathing, severe bleeding, stroke symptoms, overdose, or suicidal statements) using plain string/regex rules with **no language-model call** (Requirement 42.4).
+
+```typescript
+// Deterministic emergency-language check — no model call (Req 42.4).
+function detectEmergency(text: string): boolean;
+```
+
+On a match, the router (Requirement 42):
+1. Replies on the WhatsApp_Channel directing the patient to call emergency services (911) or go to the emergency room (Requirement 42.1).
+2. Raises an **urgent** `Handoff_Request` (Requirement 42.2, see Human handoff below).
+3. **Short-circuits** all other handling for that message, so **no Case is created or mutated** from it (Requirement 42.3).
+
+Because the check is deterministic and runs before intake, an emergency message can never fall through to case creation.
+
+#### `lib/whatsapp/handoff.ts` — human handoff
+
+A `Handoff_Request` records that a staff member should contact a patient directly — raised when a patient explicitly asks for a human, or automatically on an emergency (Requirement 43).
+
+```typescript
+interface HandoffRequestInput {
+  patientPhone: string;
+  caseId?: string;     // linked Case where one exists
+  reason: string;      // e.g. "patient requested a human" | "emergency language detected"
+  urgent: boolean;     // set for emergencies (Req 42.2, 43.2)
+}
+
+// Persists a HandoffRequest row and broadcasts a staff notification.
+async function recordHandoff(req: HandoffRequestInput): Promise<void>;
+```
+
+When a `Handoff_Request` is recorded, AuthPilot sends a staff notification on the WhatsApp_Channel identifying the handoff (Requirement 43.3); when `urgent` is set, that staff notification is **flagged urgent** (Requirement 43.4). A patient's explicit request for a human raises a non-urgent handoff (Requirement 43.1); an emergency raises an urgent one (Requirement 43.2).
+
+#### `lib/whatsapp/fallback.ts` — conversational fallback (scoped LLM)
+
+Inbound messages that match **neither** a structured staff command, a clear new-case trigger, nor a status query are routed to an **LLM-backed** `Conversational_Fallback` that answers helpfully within strict, role-scoped content limits (Requirements 32.7, 34.10, 44).
+
+```typescript
+interface FallbackInput {
+  role: "patient" | "staff";
+  text: string;
+  caseContext?: CaseSummary;   // provided for staff; PHI-free summary only for patient
+}
+
+// Produces a scoped reply string under the role-specific system prompt.
+async function conversationalFallback(input: FallbackInput): Promise<string>;
+```
+
+Two role-scoped system prompts enforce the compliance boundary:
+
+- **Patient scope** (Requirements 44.2–44.5) — MAY explain general concepts, the appeal process, and typical timelines in general terms, acknowledge frustration, and ask a clarifying question. MUST NOT state any specific denial reason, diagnosis, procedure code, dollar amount, or policy detail (no PHI); MUST NOT give medical advice (redirect medical questions to the patient's physician); and MUST NOT promise a case outcome.
+- **Staff scope** (Requirements 44.6, 44.7) — MAY explain a Case's decision reasoning, status, and AuthPilot's decision thresholds. MUST NOT perform any case action from free text and MUST NOT guess a case identifier that was not clearly provided.
+
+**Compliance boundary.** The fallback is the only LLM-backed reply path on the channel, so its patient scope is deliberately narrow: it never interpolates case specifics, and patient-directed replies remain PHI-free consistent with Requirement 33. Because the reply wording is model-generated, its exact phrasing is validated by example/smoke tests rather than property tests; the **routing decision** into the fallback (that non-command / non-trigger / non-status messages reach it, and that staff free text never performs an action) is deterministic and testable.
+
+#### Staff free-text action guardrail (`lib/whatsapp/router.ts`)
+
+When a staff message expresses an **intent to act** on a Case (for example "approve this", "please send it", "reject that one") **without** using the exact structured command format, AuthPilot refuses to act (Requirement 45):
+- It performs **no case action** from the ambiguous message (Requirements 45.1, 45.3, 44.7).
+- It replies asking the staff member to use the structured command format `Approve <case-id>` or `Reject <case-id>` (Requirement 45.2).
+
+Only a well-formed `parseStaffCommand` result (with an explicit case id) ever reaches `performCaseAction`; loose intent and any guessed/absent case id are refused, so every case action stays traceable to an exact command.
+
+#### Unsupported inbound types and ambiguous short replies (`lib/whatsapp/router.ts`)
+
+- **Unsupported inbound type** (Requirement 46) — when an inbound message is of an unsupported type (audio, video, location, sticker, contacts, or an otherwise unrecognized `kind: "unsupported"`), AuthPilot replies asking the sender to resend the content as text, a photo, or a PDF, and **creates no Case and mutates no existing Case** from that message.
+- **Ambiguous short patient reply** (Requirement 47) — when a patient sends a short or ambiguous message with no clear referent and there is no open-Case context for that patient, AuthPilot replies with a clarifying question and **does not create a new Case** from that message.
+
+Both paths are terminal replies that never touch case state, so a stray reply or an unsupported attachment can never open or change a Case.
+
 #### `lib/whatsapp/wiring.ts` — port binding (composition root)
 
-`buildRouterPorts()` binds the abstract `RouterPorts` to the real services: `createCase` to the in-process case-creation logic used by `/api/cases`, `humanAction` to the in-process logic used by `/api/cases/[id]/action`, the lookups to Prisma queries, and `send` to `createSender(config)`. This keeps the router pure while the route stays a thin adapter.
+`buildRouterPorts()` binds the abstract `RouterPorts` to the real services: `createCase` to the in-process case-creation logic used by `/api/cases`, `performCaseAction` to the shared `lib/caseActions.ts` operation used by `/api/cases/[id]/action`, the lookups to Prisma queries, `classifyMedia` to the media gate, `detectEmergency` to the deterministic emergency detector, `recordHandoff` to the handoff store + staff broadcast, `conversationalFallback` to the scoped LLM fallback, and `send` to `createSender(config)`. This keeps the router pure while the route stays a thin adapter.
 
 ### Voice transcript intake (`lib/voice/transcriptIntake.ts`)
 
@@ -792,7 +961,7 @@ function redactedSummary(cfg: AppConfig): Record<string, "set" | "missing">;
 | `/api/cases` | GET | List all cases for the Dashboard | 10.1 |
 | `/api/cases/[id]` | GET | Full case detail: fields, trace steps, recommendation, appeal | 13.1–13.4 |
 | `/api/cases/[id]/trace` | GET | Trace steps created after a `since` timestamp | 11.1–11.3 |
-| `/api/cases/[id]/action` | POST | Human action: approve / edit / request-more-evidence / reject; and Case_Outcome recording (appeal-won / appeal-denied) for AppealSent cases. Accepts an `Idempotency-Key` header; every status change is gated by `assertTransition` | 8.1–8.7, 16, 24, 26, 28 |
+| `/api/cases/[id]/action` | POST | Human action: approve / edit / request-more-evidence / reject — delegated to the shared `performCaseAction` (`lib/caseActions.ts`) rather than containing inline action logic; and Case_Outcome recording (appeal-won / appeal-denied) for AppealSent cases. Accepts an `Idempotency-Key` header; every status change is gated by `assertTransition` | 8.1–8.10, 16, 24, 26, 28, 40 |
 | `/api/cases/[id]/audit/export` | GET | Generate audit-trail PDF | 9.4 |
 | `/api/cases/[id]/audit/verify` | GET | Run `verifyAuditChain(caseId)`; return `{ intact, headHash, firstBrokenEventId?, reason? }` | 25.4–25.7 |
 | `/api/analytics` | GET | Aggregations for the Analytics page (denials grouped by the Case payer reference with an "Unknown payer" bucket) | 14.1–14.4 |
@@ -800,11 +969,11 @@ function redactedSummary(cfg: AppConfig): Record<string, "set" | "missing">;
 | `/api/patients/search` | GET | Global search by patient name | 19.2 |
 | `/api/demo/reset` | POST | Re-run seed | 18.5 |
 | `/api/whatsapp/webhook` | GET | WhatsApp verify handshake: echo the challenge only when the presented verify token matches the configured token | 31.1, 31.2 |
-| `/api/whatsapp/webhook` | POST | WhatsApp inbound: raw-body capture → `X-Hub-Signature-256` HMAC verify → fast 200 → dedupe → parse → route by role → templated reply. Reuses the `/action` route's `Human_Action` logic in-process for staff approvals; writes normal `Trace_Step`/`Audit_Chain` entries | 31.3–31.7, 32, 33, 34, 35, 36 |
+| `/api/whatsapp/webhook` | POST | WhatsApp inbound: raw-body capture → `X-Hub-Signature-256` HMAC verify → fast 200 → dedupe → parse → emergency short-circuit → media gate → route by role → templated reply. Staff approvals invoke the shared `performCaseAction` (`lib/caseActions.ts`) in-process; writes normal `Trace_Step`/`Audit_Chain` entries | 31.3–31.7, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47 |
 
 Intake validation (zod): rejects empty text with no file (1.3) and missing intake type (1.4) with a field-identifying message. The schema also accepts an optional `urgent` boolean that defaults to `false` when omitted (Requirement 1.7); the POST `/api/cases` handler sets `Case.isUrgent` from it and computes `slaDeadline` as `slaDeadline(createdAt, urgent)` — createdAt + 72h when urgent, createdAt + 7d otherwise (Requirements 1.8, 1.9, 12.1).
 
-The `/api/cases/[id]/action` route accepts, in addition to the four Human_Action types, two Case_Outcome action types — `appeal_won` and `appeal_denied` — for Cases in status `AppealSent` (Requirement 24). These are handled by extending the existing action route rather than adding a dedicated route, keeping all Case-mutating operator actions behind one validated handler. See Error Handling → Human-in-the-loop for the outcome transition, guard, and rollback rules.
+The `/api/cases/[id]/action` route accepts, in addition to the four Human_Action types, two Case_Outcome action types — `appeal_won` and `appeal_denied` — for Cases in status `AppealSent` (Requirement 24). The four Human_Action types (approve / edit / request_more_evidence / reject) are delegated to the shared `performCaseAction` operation (`lib/caseActions.ts`) with `meta.source: "dashboard"` — the same implementation the WhatsApp staff-command handler invokes — so the route holds no inline action logic and the `human_action` `Trace_Step` is written only by `performCaseAction` (Requirements 8.10, 40.1–40.3). These are handled by extending the existing action route rather than adding a dedicated route, keeping all Case-mutating operator actions behind one validated handler. See Error Handling → Human-in-the-loop for the outcome transition, guard, and rollback rules.
 
 **Idempotency and transition safety on the action route.** Every mutating call to `/action` carries a client-supplied `Idempotency-Key` (header). The handler wraps its effect in `withIdempotency(key, op)`: a first-seen key runs the op once and stores its result with the key; a retry with an already-processed key returns the stored original result without re-running the op, so an approval/submission/outcome/stage-advance is applied at most once across retries (Requirement 26). Independently, every status change the handler performs (approve → `AppealSent`, reject → `NeedsHumanInput`, outcome → `Resolved`/`DeniedFinal`, and any stage-advancing write) is first validated with `assertTransition(from, to)`; illegal transitions are rejected with the status left unchanged and a message identifying the illegal transition, while a same-state request is an idempotent no-op success (Requirement 28). The two mechanisms compose: `assertTransition` decides whether a transition is legal, and `withIdempotency` ensures a legal transition takes effect only once.
 
@@ -872,6 +1041,7 @@ model Case {
   status                  String           // New | Investigating | NeedsHumanInput | AwaitingApproval | AppealSent | Resolved | DeniedFinal
   isUrgent                Boolean          @default(false)
   patientPhone            String?          // opt-in patient WhatsApp number, used only for generic status lookups (Req 32.4)
+  patientNameHint         String?          // free-text patient name hint from intake (e.g. WhatsApp), used for status-by-name lookup; not PHI-bearing linkage
   slaDeadline             DateTime
   resolutionPath          String?          // Auto_Draft | Draft_And_Request_Evidence | Escalate_To_Human
   overallConfidence       Float?
@@ -896,7 +1066,7 @@ model ExtractedField {
   fieldName  String
   value      String
   confidence Float
-  sourceType String   // "chart_note" | "payer_policy" | "raw_intake" | "code_lookup"
+  sourceType String   // "chart_note" | "payer_policy" | "raw_intake" | "code_lookup" | "human_provided"
   reasoning  String
   timestamp  DateTime @default(now())
 }
@@ -940,9 +1110,19 @@ model WhatsAppMessage {
   sender      String                  // phone number (E.164)
   role        String                  // "patient" | "staff"
   content     String                  // message text or template id (generic, PHI-free for patient outbound — Req 33.3)
-  messageType String                  // "text" | "interactive" | "button" | "image" | "audio" | "template" | "unsupported"
+  messageType String                  // "text" | "interactive" | "button" | "image" | "audio" | "template" | "conversational" | "notification" | "unsupported"
   waMessageId String?                 // provider message id where available
+  providerMessageId String? @unique   // inbound provider message id used for dedupe; aligns with ProcessedMessage.messageId / waMessageId (Req 31.6)
   timestamp   DateTime @default(now())
+}
+
+model HandoffRequest {
+  id           String   @id @default(cuid())
+  caseId       String?                 // optional linked Case (Req 43.1)
+  patientPhone String                  // patient to be contacted (E.164)
+  reason       String                  // e.g. "patient requested a human" | "emergency language detected"
+  urgent       Boolean  @default(false)// set for emergencies; drives urgent staff notification (Req 42.2, 43.2, 43.4)
+  createdAt    DateTime @default(now())
 }
 ```
 
@@ -952,7 +1132,9 @@ model WhatsAppMessage {
 
 **Status-transition note.** `Case.status` is a free-text column at the storage layer, but every write goes through `assertTransition` in `lib/caseStatus.ts`, which enforces the allowed-transition table (Requirement 28); the persistence layer never sets a status that the guard has not approved.
 
-**WhatsApp dedupe and channel store.** `ProcessedMessage`, keyed by the inbound `messageId`, is the durable at-most-once claim used by `lib/whatsapp/dedupe.ts` so each inbound message is processed once across provider redeliveries, reusing the idempotency semantics of Requirement 26 (Requirement 31.6). `WhatsAppMessage` records every inbound and outbound channel message with its direction, sender, role, content, type, provider message id, and linked Case, providing the channel-side record that complements the shared `Audit_Chain` (Requirement 36.1). `Case.patientPhone` is an opt-in number stored only to support generic, PHI-free status lookups (Requirement 32.4) and carries no medical detail.
+**WhatsApp dedupe and channel store.** `ProcessedMessage`, keyed by the inbound `messageId`, is the durable at-most-once claim used by `lib/whatsapp/dedupe.ts` so each inbound message is processed once across provider redeliveries, reusing the idempotency semantics of Requirement 26 (Requirement 31.6). `WhatsAppMessage` records every inbound and outbound channel message with its direction, sender, role, content, type, provider message id, and linked Case, providing the channel-side record that complements the shared `Audit_Chain` (Requirement 36.1); its `providerMessageId` is the inbound provider message id used for dedupe and aligns with `ProcessedMessage.messageId` and the `waMessageId` column, and the `messageType` enumeration also covers `conversational` (fallback replies, Requirement 44) and `notification` (staff notifications, Requirements 35, 43). `Case.patientPhone` is an opt-in number stored only to support generic, PHI-free status lookups (Requirement 32.4) and carries no medical detail; `Case.patientNameHint` holds a free-text patient name from intake used only for status-by-name lookup.
+
+**Human handoff store.** `HandoffRequest`, keyed by its own id, records a request for a staff member to contact a patient directly — carrying the patient phone, an optional linked Case, a reason, and an `urgent` flag — raised on an explicit patient request (Requirement 43.1) or automatically on an emergency (Requirements 42.2, 43.2). Each recorded handoff drives a staff notification, flagged urgent when `urgent` is set (Requirements 43.3, 43.4).
 
 **Data-store portability (Requirement 39).** The schema targets SQLite by default (`datasource db { provider = "sqlite" }`). Switching to PostgreSQL is a **single configuration change** — set the Prisma datasource `provider` to `"postgresql"` and point `DATABASE_URL` at the Postgres instance — with **no change to application logic**: all persistence goes through Prisma, and no model uses a SQLite-only construct. `Json` columns map to `TEXT`/`JSONB` transparently under each provider (Requirements 39.1, 39.2).
 
@@ -963,7 +1145,7 @@ model WhatsAppMessage {
 - `Case_Outcome`: `Appeal Won` (transitions `AppealSent` → `Resolved`) and `Appeal Denied` (transitions `AppealSent` → `DeniedFinal`); surfaced on the `/action` route as action types `appeal_won` and `appeal_denied` (Requirement 24).
 - `Pipeline_Stage`: `Intake_And_Extraction`, `Medical_Review`, `Policy_Review`, `Strategy`, `Decision_Intelligence`, `Appeal_Generation`, `Verification_QA`, `Human_Approval`, `Submission_And_Tracking`.
 - `intakeType`: `denial_letter`, `new_pa_request`, `phone_note`, `whatsapp_patient_note`.
-- `sourceType`: `raw_intake`, `chart_note`, `payer_policy`, `code_lookup`.
+- `sourceType`: `raw_intake`, `chart_note`, `payer_policy`, `code_lookup`, `human_provided`.
 - `stepType` (exactly seven allowed values, Requirements 23.3, 23.6): `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`.
 - `Verification_Result.status`: `pass`, `fail`.
 - `FlaggedIssue.type`: `unsupported_citation`, `reference_mismatch`, `unsupported_claim`, `unresolved_citation`, `verification_error`.
@@ -1485,6 +1667,36 @@ The properties below were derived from the acceptance-criteria prework. Criteria
 
 **Validates: Requirements 38.4**
 
+### Property 75: Shared case action dispatches each action type correctly
+
+*For any* Case and any `CaseActionType`, `performCaseAction(caseId, actionType, meta)` produces the action's defined outcome: **approve** results in `newStatus === "AppealSent"` with a non-empty `pdfUrl` (an Appeal_Packet is generated when the Case has none) and the simulated submission step invoked; **reject** results in `newStatus === "NeedsHumanInput"` and a staff manual-review notification sent; **edit** with `meta.source === "dashboard"` updates the Case recommendation and leaves `Case_Status` unchanged, while **edit** with `meta.source === "whatsapp"` is refused (`success === false`) leaving both the recommendation and `Case_Status` unchanged; and **request_more_evidence** appends an `Extracted_Field` with `sourceType === "human_provided"`, sets `newStatus === "Investigating"`, and triggers a fire-and-forget pipeline re-run. Every resulting status change is applied through `assertTransition` and `withIdempotency`, and the `human_action` `Trace_Step` for the transition is written only by `performCaseAction`.
+
+**Validates: Requirements 40.3, 40.5, 40.6, 40.7, 40.8, 40.9, 40.10, 8.10**
+
+### Property 76: Shared case action never throws
+
+*For any* `CaseActionType` and *any* injected persistence failure at *any* point during execution, `performCaseAction` resolves to a structured `CaseActionResult` with `success === false` and a non-empty human-readable `message`, leaves the `Case_Status` unchanged, and never propagates an exception to the caller.
+
+**Validates: Requirements 40.4**
+
+### Property 77: Emergency language short-circuits deterministically
+
+*For any* inbound patient text, `detectEmergency` is deterministic and uses no language-model call, and *for any* text it classifies as emergency language, the router replies with the emergency-care template, records an **urgent** `Handoff_Request`, and creates or mutates **no** Case from that message — the emergency path runs first and short-circuits all other patient-message handling.
+
+**Validates: Requirements 42.1, 42.2, 42.3, 42.4, 43.2**
+
+### Property 78: Staff free-text action intent is refused without a structured command
+
+*For any* staff message that expresses an intent to act on a Case (approve / send / reject) without using an exact structured command with an explicit case id, `performCaseAction` is never invoked and no Case is changed, and the reply asks the staff member to use the structured format `Approve <case-id>` or `Reject <case-id>`; a case id that was not clearly provided is never guessed.
+
+**Validates: Requirements 45.1, 45.2, 45.3, 34.9, 44.7**
+
+### Property 79: Media quality gate routes usable files and blocks unusable ones
+
+*For any* inbound image or PDF, the classify → route decision consuming its `Media_Quality_Result` satisfies: when `usable` is true, the extracted text is routed through the same intake path as an inbound text message; when `usable` is false, no Case is created and the reply is corrective guidance specific to the result's `reason` (one of blurry, too_dark, cropped, not_a_document, wrong_document_type); and any error in the quality check or extraction is treated as not usable (fail-safe), so extraction results are never used on error.
+
+**Validates: Requirements 41.1, 41.2, 41.3, 41.4, 41.5**
+
 ## Error Handling
 
 ### Intake and API validation
@@ -1602,8 +1814,8 @@ AuthPilot is a single Next.js repo and deploys the same way whether or not the W
 
 ### Dual approach
 
-- **Property-based tests** verify the 74 universal properties above across many generated inputs. They target the pure and near-pure logic: the Decision_Engine, SLA computations, entity/field invariants, contradiction/stale/gap detection, trace filtering and merging, aggregation, search, and the runner's decision/PDF/human-action side-effect rules (with Qwen and Prisma mocked/in-memory where needed). The multi-stage additions are covered too: stage ordering (36), parallel review overlap (37), unresolved-field tracing (38), per-stage labeling (39, 41), stage-failure escalation (40), stage-scoped tool access (42), strategy win-probability range/ordering/fallback (43–45), verification detection/definition/gating/error handling (46–49), and pipeline-data persistence/restriction (50–52). The gap-closure additions are covered by the urgent-driven SLA deadline (30) and denials-by-payer bucketing (32), patient/payer linkage (53), and case-outcome transitions, rejection guard, and rollback atomicity (54–56). The hardening additions are covered by Qwen transient-vs-permanent retry classification (57), verification citation grounding (58), audit-chain intactness and tamper localization (59, 60), idempotent mutating operations (61), the deterministic safety guard's fencing and injection detection (62), status-transition legality (63), blocking-findings-only routing (64), and gold-case evaluation pass/fail (65). The WhatsApp/voice/config additions are covered by signature-verification exactness (66), the verify handshake (67), inbound dedupe at-most-once (68), inbound-parser totality (69), staff-command parsing and Staff_Number authorization (70), the PHI-free patient-template structural guarantee (71), the closed-window single re-attempt bound (72), fail-fast/all-or-nothing config validation (73), and secret-free config summary (74).
-- **Example-based unit tests** cover specific behaviors and edge cases: intake redirect, async immediate-return, the urgent-flag toggle defaulting to off on the intake form (Requirement 1.7), UI rendering of panels/cards/badges, source-tag expansion, polling cadence, the diagnosis-code-unavailable edge case (Requirement 3.7), the `LiveTracePanel` stage icon/label rendering for each stepType (Requirements 11.5, 20.7–20.10), the `HumanActionZone` flagged-issue display on verification fail (Requirement 22.6), the `HumanActionZone` Appeal Won / Appeal Denied controls appearing only for `AppealSent` cases (Requirement 24.1), the retention of `resolvedAt` feeding resolution-rate and average-time-to-resolution analytics (Requirement 24.6), that Intake_And_Extraction resolves the five fields in one stage (Requirement 20.3), and that the Strategy stage invokes `checkPriorAuthHistory` and consumes the policy diff (Requirements 21.1, 17.3). The WhatsApp/voice additions add example tests for the fast-ack-then-async POST lifecycle (Requirement 31.5), a channel-originated staff action producing chained Trace_Steps that `verifyAuditChain` accepts (Requirement 31.7, 36.2), the patient status-lookup-by-phone with a generic reply and no pipeline re-run and the no-open-case reply (Requirements 32.4, 32.5), the staff `Approve`/`Reject`/`Status`/`Show` effects and one-line/link replies (Requirements 34.2–34.5), the four staff notifications on their triggers (Requirements 35.1–35.4), that each inbound/outbound message writes a `WhatsAppMessage` row (Requirement 36.1), and that `transcriptToIntake` yields a `phone_note` intake that runs the normal pipeline (Requirement 37.1).
+- **Property-based tests** verify the 79 universal properties above across many generated inputs. They target the pure and near-pure logic: the Decision_Engine, SLA computations, entity/field invariants, contradiction/stale/gap detection, trace filtering and merging, aggregation, search, and the runner's decision/PDF/human-action side-effect rules (with Qwen and Prisma mocked/in-memory where needed). The multi-stage additions are covered too: stage ordering (36), parallel review overlap (37), unresolved-field tracing (38), per-stage labeling (39, 41), stage-failure escalation (40), stage-scoped tool access (42), strategy win-probability range/ordering/fallback (43–45), verification detection/definition/gating/error handling (46–49), and pipeline-data persistence/restriction (50–52). The gap-closure additions are covered by the urgent-driven SLA deadline (30) and denials-by-payer bucketing (32), patient/payer linkage (53), and case-outcome transitions, rejection guard, and rollback atomicity (54–56). The hardening additions are covered by Qwen transient-vs-permanent retry classification (57), verification citation grounding (58), audit-chain intactness and tamper localization (59, 60), idempotent mutating operations (61), the deterministic safety guard's fencing and injection detection (62), status-transition legality (63), blocking-findings-only routing (64), and gold-case evaluation pass/fail (65). The WhatsApp/voice/config additions are covered by signature-verification exactness (66), the verify handshake (67), inbound dedupe at-most-once (68), inbound-parser totality (69), staff-command parsing and Staff_Number authorization (70), the PHI-free patient-template structural guarantee (71), the closed-window single re-attempt bound (72), fail-fast/all-or-nothing config validation (73), and secret-free config summary (74). The shared-case-action and WhatsApp-intelligence additions are covered by shared case-action dispatch (75) and its never-throws contract (76), emergency-language deterministic short-circuit (77), the staff free-text action guardrail (78), and the media quality gate's route/block decision (79).
+- **Example-based unit tests** cover specific behaviors and edge cases: intake redirect, async immediate-return, the urgent-flag toggle defaulting to off on the intake form (Requirement 1.7), UI rendering of panels/cards/badges, source-tag expansion, polling cadence, the diagnosis-code-unavailable edge case (Requirement 3.7), the `LiveTracePanel` stage icon/label rendering for each stepType (Requirements 11.5, 20.7–20.10), the `HumanActionZone` flagged-issue display on verification fail (Requirement 22.6), the `HumanActionZone` Appeal Won / Appeal Denied controls appearing only for `AppealSent` cases (Requirement 24.1), the retention of `resolvedAt` feeding resolution-rate and average-time-to-resolution analytics (Requirement 24.6), that Intake_And_Extraction resolves the five fields in one stage (Requirement 20.3), and that the Strategy stage invokes `checkPriorAuthHistory` and consumes the policy diff (Requirements 21.1, 17.3). The WhatsApp/voice additions add example tests for the fast-ack-then-async POST lifecycle (Requirement 31.5), a channel-originated staff action producing chained Trace_Steps that `verifyAuditChain` accepts (Requirement 31.7, 36.2), the patient status-lookup-by-phone with a generic reply and no pipeline re-run and the no-open-case reply (Requirements 32.4, 32.5), the staff `Approve`/`Reject`/`Status`/`Show` effects and one-line/link replies (Requirements 34.2–34.5), the four staff notifications on their triggers (Requirements 35.1–35.4), that each inbound/outbound message writes a `WhatsAppMessage` row (Requirement 36.1), and that `transcriptToIntake` yields a `phone_note` intake that runs the normal pipeline (Requirement 37.1). The shared-case-action and WhatsApp-intelligence additions add example/smoke tests for the LLM- and UI/library-bound behaviors that are not property-able: the `Conversational_Fallback` reply wording and its patient/staff content-scope constraints — no PHI/denial-reason/code/dollar/policy detail, no medical advice, no outcome promises for patients; reasoning/status/thresholds but no free-text actions and no guessed case id for staff (Requirements 44.2–44.7); the media OCR / PDF text-extraction correctness on a usable file (Requirement 41.4, integration); the reason-specific corrective replies for each unusable media reason (Requirement 41.2, 41.3); the unsupported-inbound-type resend-guidance reply with no Case created or mutated (Requirement 46); the ambiguous-short-reply clarifying question with no Case created (Requirement 47); and the handoff staff notification, urgent-flagged for emergencies (Requirements 43.1, 43.3, 43.4).
 - **Integration tests** cover I/O and library-bound behavior with 1–3 examples: PDF text extraction on intake (1.2), appeal and audit PDF generation (7.4, 9.4), the NIH lookup happy path (3.3), and inbound WhatsApp denial-letter image text extraction feeding the normal intake path (Requirement 32.2).
 - **Smoke/architectural tests** cover one-shot setup and wiring guarantees: seed content assertions and demo reset (Requirements 18.1–18.5); that the tool registry contains only the five existing tools (Requirement 20.11); that the pipeline defines exactly the nine named stages with no separate Learning/Memory/Document/Entity/Orchestrator Qwen call (Requirement 20.12); that Decision_Intelligence and Appeal_Generation receive summary/decision objects rather than raw documents (Requirements 5.2, 7.2); that the four generic `PATIENT_TEMPLATES` triggers are defined (Requirement 33.1); that no real-time telephony/media module exists — the voice channel is transcript-only (Requirement 37.2); that the default Prisma datasource provider is SQLite (Requirement 39.1); and that switching the datasource provider to PostgreSQL plus `DATABASE_URL` is the only change required, with the schema using no provider-specific constructs (Requirement 39.2).
 - **Behavioral evaluation (gold cases).** `scripts/eval.ts` loads the `eval/gold/*.json` fixtures and runs `runGoldCases` against deterministic fakes, reporting per-case pass/fail (Property 65, Requirements 30.1–30.4). This is run as a test and can gate CI so a decision-logic change that breaks a known case fails the build.
@@ -1617,7 +1829,7 @@ AuthPilot is a single Next.js repo and deploys the same way whether or not the W
 - Each property test runs a **minimum of 100 iterations** (`{ numRuns: 100 }` or higher).
 - Each property test is tagged with a comment referencing its design property in the format:
   `// Feature: authpilot, Property {number}: {property_text}`
-- Each of the 74 correctness properties is implemented by a **single** property-based test.
+- Each of the 79 correctness properties is implemented by a **single** property-based test.
 - External dependencies (Qwen, NIH API) are replaced with deterministic fakes; the database uses an in-memory/temporary SQLite instance so property tests stay fast and cheap enough for 100+ iterations.
 
 ### Generators
@@ -1648,6 +1860,10 @@ AuthPilot is a single Next.js repo and deploys the same way whether or not the W
 - **Patient-interaction generator**: patient inbound messages and Case states driving the router's patient path, for the PHI-free patient-template structural property (71) — asserting every patient-directed send is a member of `PATIENT_TEMPLATES` with no interpolated case content.
 - **Send-outcome generator**: sequences of outbound attempt results (in-window success, in-window failure, closed-window errors drawn from `CLOSED_WINDOW_ERROR_CODES`, timeouts), for the closed-window single-re-attempt bound (72) — asserting at most one template fallback and no resend loop.
 - **Config-env generator**: environments over the required keys (`QWEN_API_KEY`, `QWEN_API_BASE`, `DATABASE_URL`) and the four WhatsApp keys, generating each present/absent/invalid combination (including all 2⁴ WhatsApp presence subsets) with random secret values, for the fail-fast/all-or-nothing config property (73) and the secret-free `redactedSummary` property (74).
+- **Case-action generator**: `(CaseActionType, meta.source ∈ {dashboard, whatsapp}, Case state)` tuples — Cases with and without an existing `appealPdfUrl`, across statuses — paired with an injectable persistence-failure position, for the shared case-action dispatch property (75) and the never-throws contract (76); asserts per-action-type outcomes (approve→AppealSent+pdf, reject→NeedsHumanInput+notification, edit whatsapp-refused/dashboard-applied, request_more_evidence→human_provided+Investigating+re-run) and that any injected failure yields `{ success: false }` without throwing.
+- **Emergency-text generator**: inbound patient texts mixing known emergency-language phrases (chest pain, difficulty breathing, severe bleeding, stroke, overdose, suicidal statements) with benign text and near-miss phrasings, for the emergency short-circuit property (77) — asserts `detectEmergency` determinism and, on a match, emergency reply + urgent `Handoff_Request` + no Case created/mutated.
+- **Staff-free-text generator**: staff messages expressing action intent (approve/send/reject) in free-form phrasing without an exact structured command or explicit case id, mixed with well-formed commands and unrelated text, for the staff free-text action guardrail property (78) — asserts `performCaseAction` is never invoked and the reply requests the structured `Approve <case-id>` / `Reject <case-id>` format.
+- **Media-quality generator**: `Media_Quality_Result` values — usable-with-text and each unusable reason (blurry, too_dark, cropped, not_a_document, wrong_document_type) — plus an error/fail-safe flag and single- and multi-file deliveries, for the media quality gate property (79) — asserts usable ⇒ routed through the text-intake path with the extracted text, not usable/error ⇒ no Case and a reason-specific corrective reply.
 
 ### Coverage mapping
 
