@@ -57,6 +57,11 @@ This document defines the requirements for the full application: a Next.js 14 (A
 - **Voice_Transcript**: The text transcript of a phone call submitted to AuthPilot as the source of a "phone_note" Intake, without any real-time media or telephony processing.
 - **App_Configuration**: The set of configuration keys required to run AuthPilot, including the datasource provider and connection URL and the WhatsApp_Channel keys, validated at startup.
 - **PHI**: Protected health information — patient-identifying or case-specific medical detail that remains within the AuthPilot application and generated PDFs and is never carried on the WhatsApp_Channel.
+- **Shared_Case_Action**: The single shared case-action operation `performCaseAction(caseId, actionType, meta)`, where actionType is one of approve, reject, edit, or request_more_evidence, and meta carries the invoking source ("dashboard" or "whatsapp") and the acting actor. Shared_Case_Action is the one implementation invoked by both the Dashboard action route and the WhatsApp staff-command handler, and is the sole writer of "human_action" Trace_Steps for these transitions.
+- **Media_Quality_Result**: The outcome of the pre-extraction quality/type check applied to an inbound WhatsApp image or PDF, comprising a usable flag and, when not usable, a reason of one of "blurry", "too_dark", "cropped", "not_a_document", or "wrong_document_type", together with any extracted text when usable.
+- **Emergency_Language**: Inbound patient text that matches AuthPilot's deterministic emergency-language patterns (for example chest pain, difficulty breathing, severe bleeding, stroke, overdose, or suicidal statements), detected without any language-model call.
+- **Handoff_Request**: A recorded request for a staff member to contact a patient directly, carrying the patient phone number, an optional linked Case, a reason, and an urgent flag.
+- **Conversational_Fallback**: The scoped conversational assistant that handles inbound WhatsApp messages that do not match a structured staff command, a clear new-case trigger, or a status query, operating under role-specific (patient or staff) content constraints.
 
 ## Requirements
 
@@ -179,6 +184,7 @@ This document defines the requirements for the full application: a Next.js 14 (A
 7. WHEN an outbound action is approved, THE AuthPilot SHALL simulate sending the action rather than transmitting to any external system.
 8. WHERE a Human_Action is initiated via the WhatsApp_Channel by a registered Staff_Number, THE AuthPilot SHALL record the resulting "human_action" Trace_Step with a channel source of "whatsapp".
 9. WHEN a Human_Action initiated via the WhatsApp_Channel changes the Case_Status, THE AuthPilot SHALL apply the change through the Case Status state machine defined in Requirement 28 and SHALL apply the change idempotently consistent with Requirement 26.
+10. THE AuthPilot SHALL perform the Approve, Reject, Edit, and Request More Evidence actions through the single Shared_Case_Action operation defined in Requirement 40, which SHALL be the sole writer of the "human_action" Trace_Step for these transitions regardless of whether the action originates from the Dashboard or the WhatsApp_Channel.
 
 ### Requirement 9: Full Audit Trail
 
@@ -482,6 +488,8 @@ The allowed Status_Transitions are defined by the following table. Any (from-sta
 3. WHEN a Case is created from a patient WhatsApp message, THE AuthPilot SHALL reply on the WhatsApp_Channel with a generic pre-approved acknowledgement Patient_Template.
 4. WHEN a patient asks for status over the WhatsApp_Channel, THE AuthPilot SHALL look up the patient's most recent open Case by phone number and reply with a generic PHI-free status Patient_Template without re-running the agent pipeline.
 5. IF a patient asks for status over the WhatsApp_Channel and no open Case exists for that phone number, THEN THE AuthPilot SHALL reply with a generic "no open case" Patient_Template.
+6. WHEN a patient sends an image or PDF over the WhatsApp_Channel, THE AuthPilot SHALL handle the file through the media quality gate defined in Requirement 41 before creating any Case.
+7. WHEN an inbound patient message does not match a clear new-case trigger or a status query, THE AuthPilot SHALL route the message to the Conversational_Fallback defined in Requirement 44 rather than creating a Case from it.
 
 ### Requirement 33: WhatsApp Patient Outbound Messaging
 
@@ -509,6 +517,9 @@ The allowed Status_Transitions are defined by the following table. Any (from-sta
 5. WHEN a registered Staff_Number sends Show <case-id>, THE AuthPilot SHALL reply with a link to the Case Detail page for that Case.
 6. WHEN a staff action from the WhatsApp_Channel changes the Case_Status, THE AuthPilot SHALL apply the change through the Case Status state machine defined in Requirement 28 and SHALL apply the change idempotently consistent with Requirement 26.
 7. IF a WhatsApp_Channel action command is sent by a sender that is not a registered Staff_Number, THEN THE AuthPilot SHALL reject the action without changing the Case.
+8. WHEN a registered Staff_Number sends Approve <case-id> or Reject <case-id>, THE AuthPilot SHALL carry out the action through the single Shared_Case_Action operation defined in Requirement 40, the same operation the Dashboard invokes.
+9. IF a staff message expresses an intent to act on a Case without using the exact structured command format, THEN THE AuthPilot SHALL apply the free-text action guardrail defined in Requirement 45 and SHALL take no case action from the ambiguous message.
+10. WHEN a staff message does not match a structured command, THE AuthPilot SHALL route the message to the Conversational_Fallback defined in Requirement 44.
 
 ### Requirement 35: WhatsApp Staff Notifications
 
@@ -559,3 +570,97 @@ The allowed Status_Transitions are defined by the following table. Any (from-sta
 
 1. THE AuthPilot SHALL run on SQLite by default.
 2. WHERE the App_Configuration datasource provider and connection URL are set to PostgreSQL, THE AuthPilot SHALL run on PostgreSQL through that single configuration change without any change to application logic.
+
+### Requirement 40: Shared Case Action Implementation
+
+**User Story:** As an operator, I want approve, reject, edit, and request-more-evidence to run through one shared implementation, so that the Dashboard and WhatsApp channels always behave identically and can never drift or double-log.
+
+#### Acceptance Criteria
+
+1. THE AuthPilot SHALL implement a single Shared_Case_Action operation `performCaseAction(caseId, actionType, meta)` where actionType is one of approve, reject, edit, or request_more_evidence and meta carries the source ("dashboard" or "whatsapp") and the acting actor.
+2. THE AuthPilot SHALL invoke the Shared_Case_Action operation from both the Dashboard action route and the WhatsApp staff-command handler, and SHALL NOT implement any separate case-action logic for either channel.
+3. THE AuthPilot SHALL make the Shared_Case_Action operation the sole writer of the "human_action" Trace_Step for the approve, reject, edit, and request_more_evidence transitions.
+4. IF a persistence operation fails while the Shared_Case_Action operation executes, THEN THE Shared_Case_Action operation SHALL return a structured failure result with success set to false and a human-readable message, and SHALL NOT propagate an exception to the caller.
+5. WHEN the Shared_Case_Action operation is invoked with actionType approve, THE AuthPilot SHALL generate the Appeal_Packet if none exists for the Case, set the Case_Status to "AppealSent", invoke the simulated Submission_And_Tracking step, and return the Appeal_Packet location reference in the result.
+6. WHEN the Shared_Case_Action operation is invoked with actionType reject, THE AuthPilot SHALL set the Case_Status to "NeedsHumanInput" and send a staff manual-review notification on the WhatsApp_Channel.
+7. WHERE the meta source is "dashboard", WHEN the Shared_Case_Action operation is invoked with actionType edit, THE AuthPilot SHALL apply the edit to the Case recommendation and SHALL NOT change the Case_Status.
+8. IF the Shared_Case_Action operation is invoked with actionType edit and the meta source is "whatsapp", THEN THE AuthPilot SHALL refuse the edit with a message and SHALL leave the Case recommendation and Case_Status unchanged.
+9. WHEN the Shared_Case_Action operation is invoked with actionType request_more_evidence, THE AuthPilot SHALL append the additional evidence as an Extracted_Field with source type "human_provided", set the Case_Status to "Investigating", and re-invoke the Agent_Runner pipeline as a fire-and-forget re-run consistent with Requirement 16.
+10. WHEN the Shared_Case_Action operation changes the Case_Status, THE AuthPilot SHALL apply the change through the Case Status state machine defined in Requirement 28 and SHALL apply the change idempotently consistent with Requirement 26.
+
+### Requirement 41: WhatsApp Media Intake and Quality Gate
+
+**User Story:** As a patient, I want AuthPilot to check my photo or PDF before it uses it, so that I get clear guidance to resend when the file is unreadable instead of a wrongly processed case.
+
+#### Acceptance Criteria
+
+1. WHEN a patient sends an image or PDF over the WhatsApp_Channel, THE AuthPilot SHALL run a quality/type check that produces a Media_Quality_Result before any text extraction is used for intake.
+2. WHEN the quality/type check classifies a file as not usable, THE AuthPilot SHALL set the Media_Quality_Result reason to one of "blurry", "too_dark", "cropped", "not_a_document", or "wrong_document_type".
+3. IF the Media_Quality_Result is not usable, THEN THE AuthPilot SHALL reply on the WhatsApp_Channel with corrective guidance specific to the Media_Quality_Result reason and SHALL NOT create a Case.
+4. WHEN the Media_Quality_Result is usable, THE AuthPilot SHALL extract the file text and route the extracted text through the same intake path as an inbound text message.
+5. IF the quality/type check or extraction fails with an error, THEN THE AuthPilot SHALL treat the file as not usable and SHALL NOT proceed with extraction results.
+6. WHEN more than one media file arrives in a single delivery, THE AuthPilot SHALL use the relevant document or documents for intake and SHALL disregard clearly unrelated files.
+
+### Requirement 42: Emergency Language Short-Circuit
+
+**User Story:** As a patient, I want AuthPilot to react instantly when I describe an emergency, so that I am directed to emergency care before anything else happens.
+
+#### Acceptance Criteria
+
+1. WHEN inbound patient text matches Emergency_Language, THE AuthPilot SHALL reply on the WhatsApp_Channel directing the patient to call emergency services or go to the emergency room.
+2. WHEN inbound patient text matches Emergency_Language, THE AuthPilot SHALL raise an urgent Handoff_Request consistent with Requirement 43.
+3. WHEN inbound patient text matches Emergency_Language, THE AuthPilot SHALL short-circuit all other patient-message handling for that message so that no Case is created or mutated from it.
+4. THE AuthPilot SHALL detect Emergency_Language using deterministic rules without invoking any language model.
+
+### Requirement 43: Human Handoff
+
+**User Story:** As a patient, I want to reach a real person when I ask or when there is an emergency, so that a staff member follows up with me directly.
+
+#### Acceptance Criteria
+
+1. WHEN a patient explicitly requests a human over the WhatsApp_Channel, THE AuthPilot SHALL record a Handoff_Request carrying the patient phone number, an optional linked Case, a reason, and an urgent flag.
+2. WHEN an emergency is detected consistent with Requirement 42, THE AuthPilot SHALL record a Handoff_Request with the urgent flag set.
+3. WHEN a Handoff_Request is recorded, THE AuthPilot SHALL send a staff notification on the WhatsApp_Channel identifying the handoff request.
+4. WHERE a Handoff_Request has the urgent flag set, THE AuthPilot SHALL flag the corresponding staff notification as urgent.
+
+### Requirement 44: WhatsApp Conversational Fallback
+
+**User Story:** As a patient or staff member, I want AuthPilot to answer general questions helpfully within safe limits, so that unstructured messages get a useful reply without exposing protected detail or taking unintended action.
+
+#### Acceptance Criteria
+
+1. WHEN an inbound WhatsApp_Message does not match a structured staff command, a clear new-case trigger, or a status query, THE AuthPilot SHALL route the message to the Conversational_Fallback.
+2. WHERE the sender is a patient, THE Conversational_Fallback MAY explain general concepts, process, and timelines in general terms, acknowledge frustration, and ask a clarifying question.
+3. WHERE the sender is a patient, THE Conversational_Fallback SHALL NOT state any specific denial reason, diagnosis, procedure code, dollar amount, or policy detail.
+4. WHERE the sender is a patient, THE Conversational_Fallback SHALL NOT give medical advice and SHALL redirect medical questions to the patient's physician.
+5. WHERE the sender is a patient, THE Conversational_Fallback SHALL NOT promise a case outcome.
+6. WHERE the sender is a registered Staff_Number, THE Conversational_Fallback MAY explain a Case's decision reasoning, status, and the AuthPilot decision thresholds.
+7. WHERE the sender is a registered Staff_Number, THE Conversational_Fallback SHALL NOT perform any case action from free text and SHALL NOT guess a case identifier that was not clearly provided.
+
+### Requirement 45: WhatsApp Staff Free-Text Action Guardrail
+
+**User Story:** As a staff member, I want AuthPilot to refuse to act on ambiguous free-text instructions, so that every case action is traceable and no case is acted on by accident.
+
+#### Acceptance Criteria
+
+1. IF a staff message expresses an intent to act on a Case, such as approving, sending, or rejecting, without using the exact structured command format, THEN THE AuthPilot SHALL refuse to perform the action.
+2. WHEN the AuthPilot refuses a free-text action per this requirement, THE AuthPilot SHALL reply asking the staff member to use the structured command format Approve <case-id> or Reject <case-id>.
+3. IF a staff message expresses an ambiguous intent to act, THEN THE AuthPilot SHALL take no case action from that message.
+
+### Requirement 46: Unsupported Inbound Message Types
+
+**User Story:** As a sender, I want AuthPilot to tell me how to resend when I send an unsupported message type, so that I know how to get my request processed.
+
+#### Acceptance Criteria
+
+1. WHEN an inbound WhatsApp_Message is of an unsupported type, including audio, video, location, sticker, contacts, or an otherwise unrecognized type, THE AuthPilot SHALL reply asking the sender to resend the content as text, a photo, or a PDF.
+2. WHEN an inbound WhatsApp_Message is of an unsupported type, THE AuthPilot SHALL NOT create a Case and SHALL NOT mutate an existing Case from that message.
+
+### Requirement 47: Ambiguous Short Reply Clarification
+
+**User Story:** As a patient, I want AuthPilot to ask what I mean when I send a short or unclear message, so that it does not open a new case from a stray reply.
+
+#### Acceptance Criteria
+
+1. WHEN a patient sends a short or ambiguous message that has no clear referent and there is no open Case context for that patient, THE AuthPilot SHALL reply with a clarifying question.
+2. WHEN a patient sends a short or ambiguous message with no clear referent and no open Case context, THE AuthPilot SHALL NOT create a new Case from that message.
