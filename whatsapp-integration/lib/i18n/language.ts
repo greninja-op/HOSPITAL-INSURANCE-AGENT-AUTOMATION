@@ -1,0 +1,414 @@
+/**
+ * AuthPilot multilingual language layer (Sarvam AI).
+ *
+ * This is the language-switching core for the WhatsApp channel. Patients rarely write in
+ * clean English, so AuthPilot:
+ *
+ *   1. DETECTS the language of an inbound patient message (deterministic script detection
+ *      first, with a Sarvam `/text-lid` refinement only for romanized/ambiguous Latin input),
+ *   2. TRANSLATES inbound non-English text to English so the deterministic intake/router and
+ *      the pipeline understand every supported language,
+ *   3. LOCALIZES generic, PHI-free outbound replies/templates back into the patient's language
+ *      (with register mirroring — formal vs code-mixed — so replies read naturally), and
+ *   4. optionally transcribes inbound voice notes (`saarika` STT) and synthesizes spoken
+ *      replies (`bulbul` TTS) for low-literacy patients.
+ *
+ * Every capability sits behind ONE injectable HTTP port ({@link SarvamFetchLike}, defaulting to
+ * the global `fetch`) so the whole layer is unit/property testable with no network and no key.
+ * There is no silent provider swap: on any Sarvam failure the operation returns `null` and the
+ * caller degrades safely (send the untranslated English base text, ask the patient to resend a
+ * voice note, etc.) rather than dropping the turn.
+ *
+ * Nothing here carries PHI: it only ever sees the patient's own words and the generic templates
+ * AuthPilot already sends. The Sarvam API key is used as a request header and is never logged.
+ */
+
+/** Per-request timeout for every Sarvam call (matches the WhatsApp sender budget). */
+export const SARVAM_TIMEOUT_MS = 8_000;
+
+/** Default Sarvam REST base URL. Overridable for tests / self-hosted gateways. */
+export const SARVAM_BASE_URL = "https://api.sarvam.ai";
+
+/** The translation register/mode Sarvam `/translate` supports. */
+export type TranslateMode = "formal" | "code-mixed" | "modern-colloquial" | "classic-colloquial";
+
+/** The subset of `fetch` this layer uses; the global `fetch` satisfies it. */
+export type SarvamFetchLike = (
+  input: string,
+  init?: RequestInit,
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/** A credential-safe audit entry describing a Sarvam failure. Never carries the API key. */
+export interface LanguageAuditEntry {
+  readonly op: "stt" | "translate" | "text_lid" | "tts";
+  /** A short, non-secret description of what went wrong. */
+  readonly reason: string;
+}
+
+/** Synthesized speech bytes ready to upload to Meta `/media` and send as a voice note. */
+export interface SynthesizedSpeech {
+  readonly buffer: Buffer;
+  readonly mimeType: string;
+}
+
+/** The result of a speech-to-text call. */
+export interface SttResult {
+  /** The native transcript (in the spoken language). */
+  readonly text: string;
+  /** The detected spoken language as a BCP-47 code (e.g. `hi-IN`), when Sarvam reports it. */
+  readonly language?: string | undefined;
+}
+
+/** The language-layer surface. Every method fails to `null` (no silent provider swap). */
+export interface LanguageLayer {
+  /** Transcribe audio natively (Sarvam `saarika`) + spoken-language id. */
+  speechToText(
+    audio: { buffer: Buffer; mimeType: string },
+    languageHint?: string,
+  ): Promise<SttResult | null>;
+  /**
+   * Detect the language of `text` as a BCP-47 code. Script-based first (deterministic, no
+   * network); uses `/text-lid` only for romanized/ambiguous Latin-script input.
+   */
+  detectLanguage(text: string): Promise<string>;
+  /** Translate arbitrary patient text to English (`en-IN`) for understanding by the pipeline. */
+  translateToEnglish(text: string, sourceLanguage?: string): Promise<string | null>;
+  /** Translate an English reply into the patient's language + register/mode. */
+  translateFromEnglish(
+    text: string,
+    targetLanguage: string,
+    mode?: TranslateMode,
+  ): Promise<string | null>;
+  /** Translate text line-by-line, preserving the original layout. */
+  translateLines(
+    lines: readonly string[],
+    targetLanguage: string,
+    mode?: TranslateMode,
+  ): Promise<string[] | null>;
+  /** Synthesize `text` to mp3 voice (Sarvam `bulbul`). Returns bytes + MIME or `null`. */
+  textToSpeech(text: string, language: string): Promise<SynthesizedSpeech | null>;
+}
+
+/** Injectable dependencies + tunables for {@link createLanguageLayer}. */
+export interface LanguageLayerDeps {
+  /** `SARVAM_API_KEY` used as the `api-subscription-key` header. Never logged. */
+  readonly apiKey: string;
+  /** STT model, e.g. `saarika:v2.5`. */
+  readonly sttModel: string;
+  /** TTS model, e.g. `bulbul:v3`. */
+  readonly ttsModel: string;
+  /** TTS speaker voice, e.g. `anushka`. */
+  readonly ttsSpeaker: string;
+  /** Max characters to synthesize (long replies are truncated to this before TTS). */
+  readonly ttsMaxChars?: number;
+  /** HTTP port (default: global `fetch`). Injected in tests to drive success/failure. */
+  readonly fetch?: SarvamFetchLike;
+  /** Base URL (default {@link SARVAM_BASE_URL}). */
+  readonly baseUrl?: string;
+  /** Per-request timeout in ms (default {@link SARVAM_TIMEOUT_MS}). */
+  readonly timeoutMs?: number;
+  /** Audit sink invoked on every failure path. Default: no-op. */
+  readonly onAudit?: (entry: LanguageAuditEntry) => void | Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Script-based language detection (pure, deterministic, no network)
+// ---------------------------------------------------------------------------
+
+/** Unicode script ranges → BCP-47 language code, for the supported languages. */
+const SCRIPT_RANGES: ReadonlyArray<{ readonly lang: string; readonly re: RegExp }> = [
+  { lang: "ta-IN", re: /[\u0B80-\u0BFF]/ }, // Tamil
+  { lang: "te-IN", re: /[\u0C00-\u0C7F]/ }, // Telugu
+  { lang: "kn-IN", re: /[\u0C80-\u0CFF]/ }, // Kannada
+  { lang: "ml-IN", re: /[\u0D00-\u0D7F]/ }, // Malayalam
+  { lang: "bn-IN", re: /[\u0980-\u09FF]/ }, // Bengali
+  { lang: "gu-IN", re: /[\u0A80-\u0AFF]/ }, // Gujarati
+  { lang: "pa-IN", re: /[\u0A00-\u0A7F]/ }, // Gurmukhi (Punjabi)
+  { lang: "or-IN", re: /[\u0B00-\u0B7F]/ }, // Odia
+  // Devanagari covers BOTH Hindi and Marathi; resolved to Hindi by script alone and
+  // disambiguated by /text-lid when needed.
+  { lang: "hi-IN", re: /[\u0900-\u097F]/ }, // Devanagari (Hindi/Marathi)
+  // International scripts. Japanese kana is checked before CJK so a Japanese sentence
+  // (kana + kanji) resolves to Japanese, not Chinese.
+  { lang: "ja", re: /[\u3040-\u30FF]/ }, // Hiragana + Katakana (Japanese)
+  { lang: "ko", re: /[\uAC00-\uD7AF\u1100-\u11FF]/ }, // Hangul (Korean)
+  { lang: "zh", re: /[\u4E00-\u9FFF]/ }, // CJK ideographs (Chinese)
+  { lang: "ar", re: /[\u0600-\u06FF\u0750-\u077F]/ }, // Arabic
+  { lang: "th", re: /[\u0E00-\u0E7F]/ }, // Thai
+  { lang: "ru", re: /[\u0400-\u04FF]/ }, // Cyrillic (Russian)
+];
+
+/** True when `text` contains any non-Latin Indic script character. */
+function hasIndicScript(text: string): boolean {
+  return SCRIPT_RANGES.some((entry) => entry.re.test(text));
+}
+
+/**
+ * Deterministic, network-free language detection from the dominant script. Returns a BCP-47 code,
+ * or `en-IN` when the text is pure Latin script (which may still be romanized Indic — the caller
+ * can refine via {@link LanguageLayer.detectLanguage}). Pure and exported for testing.
+ */
+export function detectLanguageByScript(text: string): string {
+  if (typeof text !== "string" || text.trim().length === 0) return "en-IN";
+  for (const entry of SCRIPT_RANGES) {
+    if (entry.re.test(text)) return entry.lang;
+  }
+  return "en-IN";
+}
+
+/**
+ * Detect code-mixing: native Indic script AND Latin letters in the same message. Drives the
+ * `code-mixed` vs `formal` translate mode for register mirroring. Pure.
+ */
+export function isCodeMixed(text: string): boolean {
+  if (typeof text !== "string") return false;
+  return hasIndicScript(text) && /[A-Za-z]/.test(text);
+}
+
+/** Normalize a possibly-bare language code (e.g. `hi`) to a BCP-47 form (`hi-IN`). */
+export function toBcp47(language: string): string {
+  if (typeof language !== "string" || language.trim().length === 0) return "en-IN";
+  const trimmed = language.trim();
+  if (trimmed.includes("-")) return trimmed;
+  const lower = trimmed.toLowerCase();
+  return lower === "en" ? "en-IN" : `${lower}-IN`;
+}
+
+/**
+ * Map a BCP-47 code to the exact code Sarvam expects. Sarvam uses `od-IN` for Odia (whereas the
+ * ISO/registry code is `or-IN`), so we remap it here for every Sarvam request. Pure.
+ */
+export function toSarvamCode(language: string): string {
+  const bcp = toBcp47(language);
+  return bcp === "or-IN" ? "od-IN" : bcp;
+}
+
+// ---------------------------------------------------------------------------
+// The layer
+// ---------------------------------------------------------------------------
+
+/** Default characters above which a TTS input is truncated (keep voice replies short). */
+const DEFAULT_TTS_MAX_CHARS = 2500;
+
+/**
+ * Build a {@link LanguageLayer} over the given dependencies. Pure construction — no environment or
+ * network access happens until a method is called.
+ */
+export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
+  const fetchImpl = deps.fetch ?? (globalThis.fetch as unknown as SarvamFetchLike);
+  const baseUrl = deps.baseUrl ?? SARVAM_BASE_URL;
+  const timeoutMs = deps.timeoutMs ?? SARVAM_TIMEOUT_MS;
+  const onAudit = deps.onAudit ?? (() => {});
+  const ttsMaxChars = deps.ttsMaxChars ?? DEFAULT_TTS_MAX_CHARS;
+  const apiKeyHeader = { "api-subscription-key": deps.apiKey };
+
+  async function audit(entry: LanguageAuditEntry): Promise<void> {
+    try {
+      await onAudit(entry);
+    } catch {
+      // Auditing must never break the fail-safe path.
+    }
+  }
+
+  /** POST JSON to a Sarvam endpoint with the timeout; returns parsed JSON or `null`. */
+  async function postJson(
+    path: string,
+    body: Record<string, unknown>,
+    op: LanguageAuditEntry["op"],
+  ): Promise<unknown | null> {
+    try {
+      const res = await fetchImpl(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { ...apiKeyHeader, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) {
+        await audit({ op, reason: `sarvam ${path} returned status ${res.status}` });
+        return null;
+      }
+      return await res.json();
+    } catch (error) {
+      await audit({ op, reason: `sarvam ${path} failed: ${describeError(error)}` });
+      return null;
+    }
+  }
+
+  async function speechToText(
+    audio: { buffer: Buffer; mimeType: string },
+    languageHint?: string,
+  ): Promise<SttResult | null> {
+    if (audio === null || audio === undefined || audio.buffer.length === 0) {
+      await audit({ op: "stt", reason: "absent or empty audio" });
+      return null;
+    }
+    try {
+      const form = new FormData();
+      form.append("model", deps.sttModel);
+      // With a hint, lock to that language; without one, ask for AUTO-DETECT ("unknown") so any
+      // spoken language is transcribed natively and its detected language is returned.
+      form.append(
+        "language_code",
+        languageHint !== undefined && languageHint.length > 0
+          ? toSarvamCode(languageHint)
+          : "unknown",
+      );
+      const blob = new Blob([audio.buffer], { type: audio.mimeType });
+      form.append("file", blob, "audio");
+      const res = await fetchImpl(`${baseUrl}/speech-to-text`, {
+        method: "POST",
+        headers: { ...apiKeyHeader },
+        body: form as unknown as BodyInit,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) {
+        await audit({ op: "stt", reason: `sarvam /speech-to-text returned status ${res.status}` });
+        return null;
+      }
+      const json = (await res.json()) as { transcript?: unknown; language_code?: unknown } | null;
+      const text = typeof json?.transcript === "string" ? json.transcript.trim() : "";
+      if (text.length === 0) return null; // No intelligible transcript → ask patient to resend.
+      const language =
+        typeof json?.language_code === "string" && json.language_code.length > 0
+          ? json.language_code
+          : undefined;
+      return { text, language };
+    } catch (error) {
+      await audit({ op: "stt", reason: `sarvam /speech-to-text failed: ${describeError(error)}` });
+      return null;
+    }
+  }
+
+  async function detectLanguage(text: string): Promise<string> {
+    // (1) Script-based first — deterministic, no network.
+    if (typeof text !== "string" || text.trim().length === 0) return "en-IN";
+    if (hasIndicScript(text)) {
+      // Devanagari may be Hindi or Marathi; refine via /text-lid when present.
+      const byScript = detectLanguageByScript(text);
+      if (byScript === "hi-IN") {
+        const refined = await textLid(text);
+        return refined ?? byScript;
+      }
+      return byScript;
+    }
+    // (2) Pure Latin script: may be English or ROMANIZED Indic — disambiguate via /text-lid.
+    const refined = await textLid(text);
+    return refined ?? "en-IN";
+  }
+
+  /** Call Sarvam `/text-lid` and return a BCP-47 code, or `null` on failure. */
+  async function textLid(text: string): Promise<string | null> {
+    const json = (await postJson("/text-lid", { input: text }, "text_lid")) as {
+      language_code?: unknown;
+    } | null;
+    const code = json?.language_code;
+    return typeof code === "string" && code.length > 0 ? toBcp47(code) : null;
+  }
+
+  async function translate(
+    text: string,
+    source: string,
+    target: string,
+    mode: TranslateMode,
+  ): Promise<string | null> {
+    if (typeof text !== "string" || text.length === 0) return text;
+    if (source === target) return text; // e.g. English→English needs no translation.
+    const json = (await postJson(
+      "/translate",
+      {
+        input: text,
+        source_language_code: source,
+        target_language_code: target,
+        mode,
+        numerals_format: "international", // keep digits intact (case ids, code numbers)
+      },
+      "translate",
+    )) as { translated_text?: unknown } | null;
+    const out = json?.translated_text;
+    return typeof out === "string" ? out : null;
+  }
+
+  async function translateToEnglish(text: string, sourceLanguage?: string): Promise<string | null> {
+    const source = sourceLanguage !== undefined ? toSarvamCode(sourceLanguage) : "auto";
+    return translate(text, source, "en-IN", "formal");
+  }
+
+  async function translateFromEnglish(
+    text: string,
+    targetLanguage: string,
+    mode: TranslateMode = "formal",
+  ): Promise<string | null> {
+    const target = toSarvamCode(targetLanguage);
+    if (target === "en-IN") return text; // No-op when already English.
+    return translate(text, "en-IN", target, mode);
+  }
+
+  async function translateLines(
+    lines: readonly string[],
+    targetLanguage: string,
+    mode: TranslateMode = "formal",
+  ): Promise<string[] | null> {
+    const target = toSarvamCode(targetLanguage);
+    if (target === "en-IN") return [...lines];
+    const out: string[] = [];
+    for (const line of lines) {
+      if (line.trim().length === 0) {
+        out.push(line); // Preserve blank lines verbatim so message layout is kept.
+        continue;
+      }
+      const translated = await translate(line, "en-IN", target, mode);
+      if (translated === null) return null; // A failed line fails the batch (no partial output).
+      out.push(translated);
+    }
+    return out;
+  }
+
+  async function textToSpeech(text: string, language: string): Promise<SynthesizedSpeech | null> {
+    if (typeof text !== "string" || text.trim().length === 0) return null;
+    const target = toSarvamCode(language);
+    const input = text.length > ttsMaxChars ? text.slice(0, ttsMaxChars) : text;
+    const json = (await postJson(
+      "/text-to-speech",
+      {
+        text: input,
+        target_language_code: target,
+        speaker: deps.ttsSpeaker,
+        model: deps.ttsModel,
+        // Request MP3: the REST default is WAV, which Meta rejects for WhatsApp audio messages.
+        output_audio_codec: "mp3",
+      },
+      "tts",
+    )) as { audios?: unknown } | null;
+    const audios = json?.audios;
+    if (!Array.isArray(audios) || audios.length === 0 || typeof audios[0] !== "string") {
+      await audit({ op: "tts", reason: "sarvam /text-to-speech returned no audio" });
+      return null;
+    }
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(audios[0], "base64");
+    } catch {
+      await audit({ op: "tts", reason: "sarvam /text-to-speech returned undecodable audio" });
+      return null;
+    }
+    if (buffer.length === 0) return null;
+    return { buffer, mimeType: "audio/mpeg" };
+  }
+
+  return {
+    speechToText,
+    detectLanguage,
+    translateToEnglish,
+    translateFromEnglish,
+    translateLines,
+    textToSpeech,
+  };
+}
+
+/** A short, non-secret description of a thrown error for audit reasons. */
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.name === "TimeoutError" || error.name === "AbortError" ? "timeout" : error.name;
+  }
+  return "unknown error";
+}

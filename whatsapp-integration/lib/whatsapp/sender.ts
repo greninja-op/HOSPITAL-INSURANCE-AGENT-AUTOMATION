@@ -10,6 +10,7 @@
  * SAFETY BOUNDARY (AuthPilot): all patient-facing messages are generic, pre-approved
  * templates that carry NO PHI/case specifics — the detail lives in the app/PDF only.
  */
+import { MAX_LIST_ROWS, type ListSpec } from "../i18n/languagePicker";
 
 const SEND_TIMEOUT_MS = 8000;
 const MAX_TEXT_BODY_CHARS = 4096;
@@ -125,6 +126,32 @@ export function createSender(cfg: SenderConfig) {
               reply: { id: b.id, title: b.title.slice(0, 20) },
             })),
           },
+        },
+      });
+    },
+
+    /**
+     * Send an interactive LIST (used by the language picker). Meta caps a list at 10 rows total
+     * across sections; the caller (language picker) already pages within that cap. Row titles are
+     * capped at 24 chars and descriptions at 72 per Meta limits.
+     */
+    async sendInteractiveList(to: string, list: ListSpec): Promise<SendResult> {
+      const sections = list.sections.map((s) => ({
+        ...(s.title ? { title: s.title.slice(0, 24) } : {}),
+        rows: s.rows.slice(0, MAX_LIST_ROWS).map((r) => ({
+          id: r.id,
+          title: r.title.slice(0, 24),
+          ...(r.description ? { description: r.description.slice(0, 72) } : {}),
+        })),
+      }));
+      return post(cfg, {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          body: { text: list.body.slice(0, 1024) },
+          action: { button: list.buttonLabel.slice(0, 20), sections },
         },
       });
     },
