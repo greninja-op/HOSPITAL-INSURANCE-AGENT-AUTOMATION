@@ -15,6 +15,9 @@ const schema = z.object({
   QWEN_API_KEY: z.string().min(1),
   QWEN_API_BASE: z.string().url(),
   QWEN_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // Model used for reasoning and for the international-language translation layer (the languages
+  // Sarvam does not cover). OpenAI-compatible chat-completions model name.
+  QWEN_MODEL: z.string().default("qwen-plus"),
 
   // Data (required). SQLite by default; switch provider + this URL for Postgres.
   DATABASE_URL: z.string().min(1),

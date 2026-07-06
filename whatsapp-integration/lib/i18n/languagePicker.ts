@@ -30,11 +30,13 @@ export interface SupportedLanguage {
 }
 
 /**
- * The languages a patient can choose. English first, then the Indian languages (Sarvam's
- * strength), then common international languages. Order defines picker paging.
+ * The languages a patient can choose. English first, then the Indian languages (handled by
+ * Sarvam), then the international languages (handled by the Qwen layer). Order defines picker
+ * paging. Every code here is translatable by one of the two composite halves.
  */
 export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
   { code: "en-IN", label: "English" },
+  // Indian languages (Sarvam)
   { code: "hi-IN", label: "हिन्दी" },
   { code: "ta-IN", label: "தமிழ்" },
   { code: "te-IN", label: "తెలుగు" },
@@ -45,10 +47,23 @@ export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
   { code: "mr-IN", label: "मराठी" },
   { code: "pa-IN", label: "ਪੰਜਾਬੀ" },
   { code: "or-IN", label: "ଓଡ଼ିଆ" },
+  // International languages (Qwen)
   { code: "es", label: "Español" },
   { code: "fr", label: "Français" },
+  { code: "de", label: "Deutsch" },
+  { code: "pt", label: "Português" },
+  { code: "it", label: "Italiano" },
+  { code: "nl", label: "Nederlands" },
+  { code: "ru", label: "Русский" },
   { code: "ar", label: "العربية" },
+  { code: "tr", label: "Türkçe" },
   { code: "zh", label: "中文" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+  { code: "vi", label: "Tiếng Việt" },
+  { code: "id", label: "Bahasa Indonesia" },
+  { code: "pl", label: "Polski" },
+  { code: "th", label: "ไทย" },
 ] as const;
 
 const SUPPORTED_CODES: ReadonlySet<string> = new Set(SUPPORTED_LANGUAGES.map((l) => l.code));

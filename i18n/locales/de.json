@@ -1,0 +1,68 @@
+{
+  "common": {
+    "appName": "AuthPilot",
+    "loading": "Wird geladen…",
+    "save": "Speichern",
+    "cancel": "Abbrechen",
+    "close": "Schließen",
+    "search": "Suchen",
+    "language": "Sprache"
+  },
+  "nav": {
+    "dashboard": "Übersicht",
+    "intake": "Neuer Fall",
+    "analytics": "Analysen",
+    "audit": "Prüfprotokoll"
+  },
+  "status": {
+    "new": "Neu",
+    "investigating": "In Prüfung",
+    "needsHumanInput": "Menschliche Eingabe erforderlich",
+    "awaitingApproval": "Warten auf Freigabe",
+    "appealSent": "Widerspruch gesendet",
+    "resolved": "Gelöst",
+    "deniedFinal": "Abgelehnt (endgültig)",
+    "atRisk": "Gefährdet"
+  },
+  "dashboard": {
+    "title": "Fälle",
+    "newCase": "Neuer Fall",
+    "denialsByPayer": "Ablehnungen nach Kostenträger diesen Monat",
+    "empty": "Noch keine Fälle. Erstellen Sie zunächst einen."
+  },
+  "intake": {
+    "title": "Neuen Fall starten",
+    "text": "Fügen Sie das Ablehnungsschreiben, die Überweisung oder die Telefonnotiz ein",
+    "type": "Eingabetyp",
+    "urgent": "Dringend (Frist von 72 Stunden)",
+    "submit": "Fall erstellen",
+    "errorEmpty": "Bitte fügen Sie einen Eingabetext hinzu oder laden Sie eine Datei hoch.",
+    "errorType": "Bitte wählen Sie einen Eingabetyp."
+  },
+  "case": {
+    "facts": "Extrahierte Fakten",
+    "trace": "Agent-Verlauf",
+    "actions": "Aktionen",
+    "confidence": "Konfidenz",
+    "slaCountdown": "Verbleibende Zeit",
+    "approve": "Genehmigen und senden",
+    "reject": "Ablehnen",
+    "edit": "Bearbeiten",
+    "requestEvidence": "Weitere Nachweise anfordern",
+    "downloadAppeal": "Widerspruch-PDF herunterladen",
+    "verification": "Überprüfung",
+    "flaggedIssues": "Markierte Probleme"
+  },
+  "analytics": {
+    "title": "Ablehnungsanalyse",
+    "byPayer": "Ablehnungen nach Kostenträger",
+    "atRiskList": "Gefährdete Fälle"
+  },
+  "audit": {
+    "title": "Prüfprotokoll",
+    "export": "PDF exportieren",
+    "verifyChain": "Prüfkette verifizieren",
+    "intact": "Prüfkette intakt",
+    "tampered": "Manipulation erkannt"
+  }
+}

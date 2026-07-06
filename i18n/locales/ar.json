@@ -1,0 +1,68 @@
+{
+  "common": {
+    "appName": "AuthPilot",
+    "loading": "جارٍ التحميل…",
+    "save": "حفظ",
+    "cancel": "إلغاء",
+    "close": "إغلاق",
+    "search": "بحث",
+    "language": "اللغة"
+  },
+  "nav": {
+    "dashboard": "لوحة التحكم",
+    "intake": "حالة جديدة",
+    "analytics": "التحليلات",
+    "audit": "سجل التدقيق"
+  },
+  "status": {
+    "new": "جديد",
+    "investigating": "قيد المراجعة",
+    "needsHumanInput": "يتطلب تدخلاً بشرياً",
+    "awaitingApproval": "بانتظار الموافقة",
+    "appealSent": "تم إرسال الاستئناف",
+    "resolved": "تم الحل",
+    "deniedFinal": "مرفوض (نهائي)",
+    "atRisk": "في خطر"
+  },
+  "dashboard": {
+    "title": "الحالات",
+    "newCase": "حالة جديدة",
+    "denialsByPayer": "حالات الرفض حسب الجهة الدافعة هذا الشهر",
+    "empty": "لا توجد حالات بعد. ابدأ بإنشاء واحدة."
+  },
+  "intake": {
+    "title": "بدء حالة جديدة",
+    "text": "الصق خطاب الرفض أو الإحالة أو ملاحظة المكالمة الهاتفية",
+    "type": "نوع الإدخال",
+    "urgent": "عاجل (مهلة 72 ساعة)",
+    "submit": "إنشاء حالة",
+    "errorEmpty": "يرجى إضافة نص الإدخال أو رفع ملف.",
+    "errorType": "يرجى اختيار نوع الإدخال."
+  },
+  "case": {
+    "facts": "الحقائق المستخرجة",
+    "trace": "تتبع الوكيل",
+    "actions": "الإجراءات",
+    "confidence": "درجة الثقة",
+    "slaCountdown": "الوقت المتبقي",
+    "approve": "الموافقة والإرسال",
+    "reject": "رفض",
+    "edit": "تعديل",
+    "requestEvidence": "طلب مزيد من الأدلة",
+    "downloadAppeal": "تنزيل ملف الاستئناف PDF",
+    "verification": "التحقق",
+    "flaggedIssues": "المشكلات المُعلَّمة"
+  },
+  "analytics": {
+    "title": "تحليلات الرفض",
+    "byPayer": "حالات الرفض حسب الجهة الدافعة",
+    "atRiskList": "الحالات المعرضة للخطر"
+  },
+  "audit": {
+    "title": "سجل التدقيق",
+    "export": "تصدير PDF",
+    "verifyChain": "التحقق من سلسلة التدقيق",
+    "intact": "سلسلة التدقيق سليمة",
+    "tampered": "تم اكتشاف تلاعب"
+  }
+}

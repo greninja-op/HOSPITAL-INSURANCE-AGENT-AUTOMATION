@@ -1,0 +1,68 @@
+{
+  "common": {
+    "appName": "AuthPilot",
+    "loading": "加载中…",
+    "save": "保存",
+    "cancel": "取消",
+    "close": "关闭",
+    "search": "搜索",
+    "language": "语言"
+  },
+  "nav": {
+    "dashboard": "仪表板",
+    "intake": "新建案件",
+    "analytics": "分析",
+    "audit": "审计记录"
+  },
+  "status": {
+    "new": "新建",
+    "investigating": "调查中",
+    "needsHumanInput": "需要人工处理",
+    "awaitingApproval": "等待批准",
+    "appealSent": "已发送申诉",
+    "resolved": "已解决",
+    "deniedFinal": "已拒绝（最终）",
+    "atRisk": "存在风险"
+  },
+  "dashboard": {
+    "title": "案件",
+    "newCase": "新建案件",
+    "denialsByPayer": "本月按付款方统计的拒付",
+    "empty": "暂无案件。请先创建一个。"
+  },
+  "intake": {
+    "title": "开始新案件",
+    "text": "粘贴拒付信、转诊单或电话记录",
+    "type": "录入类型",
+    "urgent": "紧急（72 小时期限）",
+    "submit": "创建案件",
+    "errorEmpty": "请添加录入文本或上传文件。",
+    "errorType": "请选择录入类型。"
+  },
+  "case": {
+    "facts": "提取的事实",
+    "trace": "智能体轨迹",
+    "actions": "操作",
+    "confidence": "置信度",
+    "slaCountdown": "剩余时间",
+    "approve": "批准并发送",
+    "reject": "拒绝",
+    "edit": "编辑",
+    "requestEvidence": "请求更多证据",
+    "downloadAppeal": "下载申诉 PDF",
+    "verification": "验证",
+    "flaggedIssues": "标记的问题"
+  },
+  "analytics": {
+    "title": "拒付情报",
+    "byPayer": "按付款方统计的拒付",
+    "atRiskList": "存在风险的案件"
+  },
+  "audit": {
+    "title": "审计记录",
+    "export": "导出 PDF",
+    "verifyChain": "验证审计链",
+    "intact": "审计链完整",
+    "tampered": "检测到篡改"
+  }
+}

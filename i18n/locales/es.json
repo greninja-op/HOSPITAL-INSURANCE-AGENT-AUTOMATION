@@ -1,0 +1,68 @@
+{
+  "common": {
+    "appName": "AuthPilot",
+    "loading": "Cargando…",
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "close": "Cerrar",
+    "search": "Buscar",
+    "language": "Idioma"
+  },
+  "nav": {
+    "dashboard": "Panel",
+    "intake": "Nuevo caso",
+    "analytics": "Analíticas",
+    "audit": "Registro de auditoría"
+  },
+  "status": {
+    "new": "Nuevo",
+    "investigating": "Investigando",
+    "needsHumanInput": "Requiere intervención humana",
+    "awaitingApproval": "Pendiente de aprobación",
+    "appealSent": "Apelación enviada",
+    "resolved": "Resuelto",
+    "deniedFinal": "Denegado (final)",
+    "atRisk": "En riesgo"
+  },
+  "dashboard": {
+    "title": "Casos",
+    "newCase": "Nuevo caso",
+    "denialsByPayer": "Denegaciones por pagador este mes",
+    "empty": "Aún no hay casos. Empieza creando uno."
+  },
+  "intake": {
+    "title": "Iniciar un nuevo caso",
+    "text": "Pega la carta de denegación, la derivación o la nota telefónica",
+    "type": "Tipo de entrada",
+    "urgent": "Urgente (plazo de 72 horas)",
+    "submit": "Crear caso",
+    "errorEmpty": "Añade el texto de entrada o sube un archivo.",
+    "errorType": "Selecciona un tipo de entrada."
+  },
+  "case": {
+    "facts": "Datos extraídos",
+    "trace": "Traza del agente",
+    "actions": "Acciones",
+    "confidence": "Confianza",
+    "slaCountdown": "Tiempo restante",
+    "approve": "Aprobar y enviar",
+    "reject": "Rechazar",
+    "edit": "Editar",
+    "requestEvidence": "Solicitar más pruebas",
+    "downloadAppeal": "Descargar PDF de apelación",
+    "verification": "Verificación",
+    "flaggedIssues": "Problemas señalados"
+  },
+  "analytics": {
+    "title": "Inteligencia de denegaciones",
+    "byPayer": "Denegaciones por pagador",
+    "atRiskList": "Casos en riesgo"
+  },
+  "audit": {
+    "title": "Registro de auditoría",
+    "export": "Exportar PDF",
+    "verifyChain": "Verificar cadena de auditoría",
+    "intact": "Cadena de auditoría intacta",
+    "tampered": "Manipulación detectada"
+  }
+}

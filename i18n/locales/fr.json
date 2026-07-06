@@ -1,0 +1,68 @@
+{
+  "common": {
+    "appName": "AuthPilot",
+    "loading": "Chargement…",
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "close": "Fermer",
+    "search": "Rechercher",
+    "language": "Langue"
+  },
+  "nav": {
+    "dashboard": "Tableau de bord",
+    "intake": "Nouveau dossier",
+    "analytics": "Analytique",
+    "audit": "Piste d'audit"
+  },
+  "status": {
+    "new": "Nouveau",
+    "investigating": "En cours d'analyse",
+    "needsHumanInput": "Intervention humaine requise",
+    "awaitingApproval": "En attente d'approbation",
+    "appealSent": "Recours envoyé",
+    "resolved": "Résolu",
+    "deniedFinal": "Refusé (définitif)",
+    "atRisk": "À risque"
+  },
+  "dashboard": {
+    "title": "Dossiers",
+    "newCase": "Nouveau dossier",
+    "denialsByPayer": "Refus par assureur ce mois-ci",
+    "empty": "Aucun dossier pour l'instant. Commencez par en créer un."
+  },
+  "intake": {
+    "title": "Ouvrir un nouveau dossier",
+    "text": "Collez la lettre de refus, l'orientation ou la note téléphonique",
+    "type": "Type de saisie",
+    "urgent": "Urgent (délai de 72 heures)",
+    "submit": "Créer le dossier",
+    "errorEmpty": "Veuillez ajouter le texte de saisie ou téléverser un fichier.",
+    "errorType": "Veuillez sélectionner un type de saisie."
+  },
+  "case": {
+    "facts": "Faits extraits",
+    "trace": "Trace de l'agent",
+    "actions": "Actions",
+    "confidence": "Confiance",
+    "slaCountdown": "Temps restant",
+    "approve": "Approuver et envoyer",
+    "reject": "Rejeter",
+    "edit": "Modifier",
+    "requestEvidence": "Demander plus de preuves",
+    "downloadAppeal": "Télécharger le PDF du recours",
+    "verification": "Vérification",
+    "flaggedIssues": "Problèmes signalés"
+  },
+  "analytics": {
+    "title": "Intelligence des refus",
+    "byPayer": "Refus par assureur",
+    "atRiskList": "Dossiers à risque"
+  },
+  "audit": {
+    "title": "Piste d'audit",
+    "export": "Exporter en PDF",
+    "verifyChain": "Vérifier la chaîne d'audit",
+    "intact": "Chaîne d'audit intacte",
+    "tampered": "Altération détectée"
+  }
+}

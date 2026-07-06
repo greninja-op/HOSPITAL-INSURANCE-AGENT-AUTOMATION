@@ -258,7 +258,7 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
           ? toSarvamCode(languageHint)
           : "unknown",
       );
-      const blob = new Blob([audio.buffer], { type: audio.mimeType });
+      const blob = new Blob([new Uint8Array(audio.buffer)], { type: audio.mimeType });
       form.append("file", blob, "audio");
       const res = await fetchImpl(`${baseUrl}/speech-to-text`, {
         method: "POST",
@@ -421,16 +421,99 @@ function describeError(error: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Composite layer: Sarvam for Indian languages + English, Qwen for international
+// ---------------------------------------------------------------------------
+
+/** The international (non-Indian) language base codes routed to the Qwen layer, not Sarvam. */
+const INTERNATIONAL_BASE_CODES: ReadonlySet<string> = new Set([
+  "es",
+  "fr",
+  "de",
+  "pt",
+  "it",
+  "nl",
+  "ru",
+  "ja",
+  "ko",
+  "zh",
+  "ar",
+  "tr",
+  "vi",
+  "id",
+  "pl",
+  "th",
+]);
+
+/**
+ * True when `code` is one of the international languages routed to the Qwen layer (Spanish,
+ * French, …, Thai). Everything else (the `xx-IN` Indian languages + English) routes to Sarvam.
+ * Pure.
+ */
+export function isInternationalLanguage(code: string | undefined): boolean {
+  if (typeof code !== "string" || code.trim().length === 0) return false;
+  const base = code.trim().toLowerCase().split("-")[0] ?? code;
+  return INTERNATIONAL_BASE_CODES.has(base);
+}
+
+/**
+ * Build a {@link LanguageLayer} that DISPATCHES by language: Indian languages (+ English) go to the
+ * Sarvam layer (`indic`), the international languages go to the Qwen layer (`intl`). It exposes the
+ * exact same surface, so the router uses it unchanged. Pure construction.
+ */
+export function createCompositeLanguageLayer(parts: {
+  readonly indic: LanguageLayer;
+  readonly intl: LanguageLayer;
+}): LanguageLayer {
+  const { indic, intl } = parts;
+  return {
+    async speechToText(audio, languageHint) {
+      // Route by the caller's language; the provider still auto-detects the actually-spoken one.
+      return isInternationalLanguage(languageHint)
+        ? intl.speechToText(audio)
+        : indic.speechToText(audio, languageHint);
+    },
+    async detectLanguage(text) {
+      // Script detection (in the Sarvam layer) already covers Indian + international scripts.
+      return indic.detectLanguage(text);
+    },
+    async translateToEnglish(text, sourceLanguage) {
+      const src = sourceLanguage ?? detectLanguageByScript(text);
+      return isInternationalLanguage(src)
+        ? intl.translateToEnglish(text, sourceLanguage)
+        : indic.translateToEnglish(text, sourceLanguage);
+    },
+    async translateFromEnglish(text, targetLanguage, mode) {
+      return isInternationalLanguage(targetLanguage)
+        ? intl.translateFromEnglish(text, targetLanguage, mode)
+        : indic.translateFromEnglish(text, targetLanguage, mode);
+    },
+    async translateLines(lines, targetLanguage, mode) {
+      return isInternationalLanguage(targetLanguage)
+        ? intl.translateLines(lines, targetLanguage, mode)
+        : indic.translateLines(lines, targetLanguage, mode);
+    },
+    async textToSpeech(text, language) {
+      return isInternationalLanguage(language)
+        ? intl.textToSpeech(text, language)
+        : indic.textToSpeech(text, language);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Config-bound factory
 // ---------------------------------------------------------------------------
 
 import { type AppConfig, loadConfig } from "../config";
+import { createInternationalLanguageLayer } from "./internationalLanguage";
 
 /**
  * Build a {@link LanguageLayer} from AuthPilot's validated config. Returns `null` when the Sarvam
  * language layer is not configured (`SARVAM_API_KEY` unset) so the channel runs English-only.
- * `fetch`, `baseUrl`, `timeoutMs`, and `onAudit` may be overridden (e.g. injected in tests). No
- * real key is required to CONSTRUCT — only to call.
+ * When Sarvam IS configured, this returns a COMPOSITE layer: Sarvam handles the Indian languages +
+ * English, and the Qwen-backed international layer handles the foreign languages (Spanish, French,
+ * German, …, Thai). `fetch`, `baseUrl`, `timeoutMs`, and `onAudit` may be overridden (e.g. injected
+ * in tests). No real key is required to CONSTRUCT — only to call.
  */
 export function createLanguageLayerFromConfig(
   overrides: Partial<
@@ -439,7 +522,7 @@ export function createLanguageLayerFromConfig(
 ): LanguageLayer | null {
   const cfg = overrides.config ?? loadConfig();
   if (!cfg.SARVAM_API_KEY) return null;
-  return createLanguageLayer({
+  const indic = createLanguageLayer({
     apiKey: cfg.SARVAM_API_KEY,
     sttModel: cfg.SARVAM_STT_MODEL,
     ttsModel: cfg.SARVAM_TTS_MODEL,
@@ -450,4 +533,13 @@ export function createLanguageLayerFromConfig(
     timeoutMs: overrides.timeoutMs,
     onAudit: overrides.onAudit,
   });
+  // International languages go to the Qwen LLM (Sarvam does not cover them).
+  const intl = createInternationalLanguageLayer({
+    apiKey: cfg.QWEN_API_KEY,
+    apiBase: cfg.QWEN_API_BASE,
+    model: cfg.QWEN_MODEL,
+    fetch: overrides.fetch,
+    onAudit: overrides.onAudit,
+  });
+  return createCompositeLanguageLayer({ indic, intl });
 }
