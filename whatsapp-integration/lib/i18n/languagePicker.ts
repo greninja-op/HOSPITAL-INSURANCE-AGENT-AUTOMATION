@@ -1,176 +1,172 @@
 /**
- * Language-switching UX for the AuthPilot WhatsApp channel.
+ * WhatsApp language picker + supported-language registry.
  *
- * Patients pick and change their language by TAPPING, never by remembering commands:
+ * A patient can change the language AuthPilot speaks to them by tapping a row in an interactive
+ * WhatsApp LIST. Because Meta caps a list at 10 rows total, the picker PAGES the supported
+ * languages: each page shows up to 9 languages plus a "More languages" row that requests the next
+ * page. Row ids are deterministic and reversible so the router can decode a tap with
+ * {@link decodeLanguageTap} without any stored state.
  *
- *   1. A first-contact / "change language" interactive list ({@link buildLanguagePickerList}),
- *      paged to respect WhatsApp's 10-row interactive-list cap, with each language labelled in
- *      its OWN script plus its English name.
- *   2. Tap decoding ({@link decodeLanguageTap}) that turns an interactive reply id (`lang:hi-IN`,
- *      `lang:__more`) into a structured selection, so a tap routes deterministically.
- *   3. Register mirroring ({@link detectRegister}, {@link translateModeForMessage}) that picks the
- *      Sarvam `/translate` mode (formal vs code-mixed) so replies read the way the patient writes.
+ * The registry is intentionally curated to the languages Sarvam handles well (the Indian
+ * languages + English) plus a set of common international languages, each labelled in its own
+ * script so the picker is self-explanatory regardless of the patient's current language.
  *
- * Pure and deterministic — this module only decides WHAT to offer and HOW to interpret a tap;
- * sending goes through the Sender (`sendInteractiveList`).
+ * Pure module — no network, no config. Safe to import from the router, the sender, and tests.
  */
-import { isCodeMixed } from "./language";
+import { isCodeMixed, type TranslateMode } from "./language";
 
-/** A selectable language: BCP-47 code, native-script label, and English name. */
-export interface LanguageOption {
-  readonly code: string;
-  readonly label: string;
-  /** English name, shown as the row subtitle so anyone can recognise their language. */
-  readonly english: string;
-}
-
-/** The supported languages, labelled in their OWN script + English (Indian first, then intl). */
-export const LANGUAGE_OPTIONS: readonly LanguageOption[] = [
-  { code: "en-IN", label: "English", english: "English" },
-  { code: "hi-IN", label: "हिन्दी", english: "Hindi" },
-  { code: "bn-IN", label: "বাংলা", english: "Bengali" },
-  { code: "mr-IN", label: "मराठी", english: "Marathi" },
-  { code: "te-IN", label: "తెలుగు", english: "Telugu" },
-  { code: "ta-IN", label: "தமிழ்", english: "Tamil" },
-  { code: "gu-IN", label: "ગુજરાતી", english: "Gujarati" },
-  { code: "kn-IN", label: "ಕನ್ನಡ", english: "Kannada" },
-  { code: "ml-IN", label: "മലയാളം", english: "Malayalam" },
-  { code: "pa-IN", label: "ਪੰਜਾਬੀ", english: "Punjabi" },
-  { code: "or-IN", label: "ଓଡ଼ିଆ", english: "Odia" },
-  { code: "es", label: "Español", english: "Spanish" },
-  { code: "fr", label: "Français", english: "French" },
-  { code: "pt", label: "Português", english: "Portuguese" },
-  { code: "ar", label: "العربية", english: "Arabic" },
-];
-
-/** Stable interactive-row ids so taps are recognised deterministically. */
-export const LANGUAGE_CHOICE_IDS = {
-  /** Language pick row id prefix, e.g. `lang:hi-IN`. */
-  prefix: "lang:",
-  /** The special "show more languages" row id (next picker page). */
-  more: "lang:__more",
-} as const;
-
-/** WhatsApp caps an interactive list at 10 rows; the picker pages within this cap. */
+/** Meta's hard cap on rows in a single interactive list (across all sections). */
 export const MAX_LIST_ROWS = 10;
 
-/** A section of an interactive list (mirrors the Sender's list spec). */
-export interface ListSection {
-  readonly title?: string;
-  readonly rows: Array<{ id: string; title: string; description?: string }>;
-}
+/** How many language rows we show per page (one row is reserved for "More languages"). */
+const LANGUAGES_PER_PAGE = MAX_LIST_ROWS - 1;
 
-/** The interactive-list spec consumed by the Sender's `sendInteractiveList`. */
-export interface ListSpec {
-  readonly buttonLabel: string;
-  readonly body: string;
-  readonly sections: ListSection[];
-}
-
-/** Number of pages the language picker spans for `total` languages at the row cap. */
-export function languagePickerPageCount(total = LANGUAGE_OPTIONS.length): number {
-  if (total <= MAX_LIST_ROWS) return 1;
-  const perPage = MAX_LIST_ROWS - 1; // reserve the last row for "More languages"
-  return Math.ceil(total / perPage);
+/** A supported language: its BCP-47 code and its label written in its own script. */
+export interface SupportedLanguage {
+  /** BCP-47 code used throughout the language layer (e.g. `hi-IN`, `en-IN`, `es`). */
+  readonly code: string;
+  /** Human label in the language's own script. */
+  readonly label: string;
 }
 
 /**
- * Build the tappable language picker, PAGED to respect the 10-row cap. One row per language
- * (id `lang:<code>`, titled in its own script). When the languages do not fit on one page, the
- * last row of a non-final page is a "More languages" control ({@link LANGUAGE_CHOICE_IDS.more})
- * that opens the next page — so every language stays reachable with a single tap.
+ * The languages a patient can choose. English first, then the Indian languages (Sarvam's
+ * strength), then common international languages. Order defines picker paging.
  */
-export function buildLanguagePickerList(
-  options: { page?: number; body?: string; buttonLabel?: string } = {},
-): ListSpec {
-  const total = LANGUAGE_OPTIONS.length;
-  const body = options.body ?? "Please choose your language / अपनी भाषा चुनें.";
-  const buttonLabel = options.buttonLabel ?? "Choose language";
-  const paged = total > MAX_LIST_ROWS;
-  const perPage = paged ? MAX_LIST_ROWS - 1 : MAX_LIST_ROWS;
-  const pageCount = languagePickerPageCount(total);
-  const page = Math.min(Math.max(options.page ?? 0, 0), pageCount - 1);
+export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
+  { code: "en-IN", label: "English" },
+  { code: "hi-IN", label: "हिन्दी" },
+  { code: "ta-IN", label: "தமிழ்" },
+  { code: "te-IN", label: "తెలుగు" },
+  { code: "ml-IN", label: "മലയാളം" },
+  { code: "kn-IN", label: "ಕನ್ನಡ" },
+  { code: "bn-IN", label: "বাংলা" },
+  { code: "gu-IN", label: "ગુજરાતી" },
+  { code: "mr-IN", label: "मराठी" },
+  { code: "pa-IN", label: "ਪੰਜਾਬੀ" },
+  { code: "or-IN", label: "ଓଡ଼ିଆ" },
+  { code: "es", label: "Español" },
+  { code: "fr", label: "Français" },
+  { code: "ar", label: "العربية" },
+  { code: "zh", label: "中文" },
+] as const;
 
-  const start = page * perPage;
-  const slice = LANGUAGE_OPTIONS.slice(start, start + perPage);
-  const rows = slice.map((opt) => ({
-    id: `${LANGUAGE_CHOICE_IDS.prefix}${opt.code}`,
-    title: opt.label,
-    // Show the English name only when it differs from the native label, to avoid duplication.
-    ...(opt.english !== opt.label ? { description: opt.english } : {}),
-  }));
-  if (start + perPage < total) {
-    rows.push({ id: LANGUAGE_CHOICE_IDS.more, title: "More languages ▸", description: "" });
-  }
+const SUPPORTED_CODES: ReadonlySet<string> = new Set(SUPPORTED_LANGUAGES.map((l) => l.code));
 
-  return { buttonLabel, body, sections: [{ title: "Languages", rows }] };
+/** True when `code` is one of the languages the picker offers. Accepts bare or BCP-47 codes. */
+export function isSupportedLanguage(code: string | undefined): boolean {
+  if (typeof code !== "string" || code.trim().length === 0) return false;
+  const trimmed = code.trim();
+  if (SUPPORTED_CODES.has(trimmed)) return true;
+  // Accept a bare Indian code like "hi" → "hi-IN".
+  if (!trimmed.includes("-") && SUPPORTED_CODES.has(`${trimmed.toLowerCase()}-IN`)) return true;
+  return false;
 }
 
-/** A decoded language-picker tap. */
-export type LanguageTap =
-  | { readonly kind: "language"; readonly code: string }
-  | { readonly kind: "morePages" }
-  | { readonly kind: "other" };
+// ---------------------------------------------------------------------------
+// Interactive list spec (transport-agnostic; the sender maps it to Meta's shape)
+// ---------------------------------------------------------------------------
 
-/** Decode an interactive reply id into a structured language selection. */
-export function decodeLanguageTap(id: string | undefined): LanguageTap {
-  if (typeof id !== "string" || id.length === 0) return { kind: "other" };
-  if (id === LANGUAGE_CHOICE_IDS.more) return { kind: "morePages" };
-  if (id.startsWith(LANGUAGE_CHOICE_IDS.prefix)) {
-    return { kind: "language", code: id.slice(LANGUAGE_CHOICE_IDS.prefix.length) };
+export interface ListRow {
+  id: string;
+  title: string;
+  description?: string;
+}
+
+export interface ListSection {
+  title?: string;
+  rows: ListRow[];
+}
+
+export interface ListSpec {
+  /** Body prompt shown above the list. */
+  body: string;
+  /** The button label that opens the list (Meta caps at 20 chars). */
+  buttonLabel: string;
+  sections: ListSection[];
+}
+
+// ---------------------------------------------------------------------------
+// Row id encoding / decoding
+// ---------------------------------------------------------------------------
+
+const LANG_PREFIX = "lang:";
+const MORE_PREFIX = "lang:more:";
+
+/** Deterministic row id for a language selection (e.g. `lang:hi-IN`). */
+function languageRowId(code: string): string {
+  return `${LANG_PREFIX}${code}`;
+}
+
+/** Deterministic row id that requests the next page (e.g. `lang:more:2`). */
+function morePagesRowId(nextPage: number): string {
+  return `${MORE_PREFIX}${nextPage}`;
+}
+
+/** The decoded meaning of a tapped picker row. */
+export type LanguageTap =
+  | { kind: "language"; code: string }
+  | { kind: "morePages"; nextPage: number }
+  | { kind: "other" };
+
+/**
+ * Decode a tapped interactive row id back into its meaning. Returns `{ kind: "other" }` for any id
+ * that is not a picker row, so the router can ignore non-picker taps. Pure.
+ */
+export function decodeLanguageTap(interactiveId: string | undefined): LanguageTap {
+  if (typeof interactiveId !== "string" || interactiveId.length === 0) return { kind: "other" };
+  if (interactiveId.startsWith(MORE_PREFIX)) {
+    const n = Number.parseInt(interactiveId.slice(MORE_PREFIX.length), 10);
+    return { kind: "morePages", nextPage: Number.isFinite(n) && n > 0 ? n : 1 };
+  }
+  if (interactiveId.startsWith(LANG_PREFIX)) {
+    const code = interactiveId.slice(LANG_PREFIX.length);
+    return code.length > 0 ? { kind: "language", code } : { kind: "other" };
   }
   return { kind: "other" };
 }
 
-/** True when `code` is one AuthPilot lists in the picker. */
-export function isSupportedLanguage(code: string | undefined): boolean {
-  if (typeof code !== "string") return false;
-  return LANGUAGE_OPTIONS.some((o) => o.code === code);
+// ---------------------------------------------------------------------------
+// Picker construction
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the interactive language picker list for a given page (1-based). Each page shows up to
+ * {@link LANGUAGES_PER_PAGE} languages; when more languages remain, a final "More languages" row
+ * is appended that, when tapped, requests the next page (decoded as `kind: "morePages"`). Pure.
+ */
+export function buildLanguagePickerList(opts: { page?: number } = {}): ListSpec {
+  const totalPages = Math.max(1, Math.ceil(SUPPORTED_LANGUAGES.length / LANGUAGES_PER_PAGE));
+  const page = Math.min(Math.max(1, opts.page ?? 1), totalPages);
+  const start = (page - 1) * LANGUAGES_PER_PAGE;
+  const slice = SUPPORTED_LANGUAGES.slice(start, start + LANGUAGES_PER_PAGE);
+
+  const rows: ListRow[] = slice.map((l) => ({ id: languageRowId(l.code), title: l.label }));
+
+  if (page < totalPages) {
+    rows.push({
+      id: morePagesRowId(page + 1),
+      title: "More languages",
+      description: "Show more language options",
+    });
+  }
+
+  return {
+    body: "Which language should we use? / किस भाषा में बात करें?",
+    buttonLabel: "Choose language",
+    sections: [{ title: "Languages", rows }],
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Register mirroring
 // ---------------------------------------------------------------------------
 
-/** The patient's writing register, mirrored back in replies. */
-export type Register = "formal" | "casual";
-
-/** Casual markers: chat-speak, common SMS contractions, and emoji. */
-const CASUAL_PATTERNS: readonly RegExp[] = [
-  /\b(u|ur|r|pls|plz|thx|thnx|ty|k|kk|lol|omg|btw|idk|imo|gonna|wanna|gotta|yeah|yep|nope|hey|hiya|sup)\b/i,
-  /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u, // emoji
-  /(.)\1{2,}/, // elongated letters (e.g. "soooo")
-  /!{2,}/, // multiple exclamation marks
-];
-
-/** Formal markers: polite forms and full, capitalised sentence structure. */
-const FORMAL_PATTERNS: readonly RegExp[] = [
-  /\b(please|kindly|thank you|regards|sir|madam|could you|would you|i would like|i am writing)\b/i,
-];
-
 /**
- * Detect whether the patient wrote formally or casually. Heuristic and deterministic: casual
- * markers win when present; otherwise an explicit polite/long-form message reads formal; the
- * neutral default is casual (warm and plain). Pure.
+ * Choose the translate register/mode for localizing a reply, mirroring the patient's own style:
+ * a code-mixed inbound message (native script + Latin, e.g. "kya ye covered hai?") gets a
+ * `code-mixed` reply; everything else gets `formal`. Pure.
  */
-export function detectRegister(text: string): Register {
-  if (typeof text !== "string" || text.trim().length === 0) return "casual";
-  for (const re of CASUAL_PATTERNS) if (re.test(text)) return "casual";
-  for (const re of FORMAL_PATTERNS) if (re.test(text)) return "formal";
-  const trimmed = text.trim();
-  const looksComposed = /^[A-Z\u0900-\u0DFF].*[.?]$/.test(trimmed) && trimmed.length > 40;
-  return looksComposed ? "formal" : "casual";
-}
-
-/** The Sarvam `/translate` mode used for replies (subset of the layer's TranslateMode). */
-export type ReplyTranslateMode = "formal" | "code-mixed";
-
-/**
- * Choose the reply translate mode, mirroring the patient's message: code-mixed input (native
- * script + English) replies `code-mixed`; a casual register also reads `code-mixed`; a formal,
- * pure-script message replies `formal`. Pure.
- */
-export function translateModeForMessage(memberText: string): ReplyTranslateMode {
-  if (isCodeMixed(memberText)) return "code-mixed";
-  return detectRegister(memberText) === "formal" ? "formal" : "code-mixed";
+export function translateModeForMessage(source: string): TranslateMode {
+  return isCodeMixed(source) ? "code-mixed" : "formal";
 }

@@ -1,0 +1,68 @@
+{
+  "common": {
+    "appName": "AuthPilot",
+    "loading": "Loading…",
+    "save": "Save",
+    "cancel": "Cancel",
+    "close": "Close",
+    "search": "Search",
+    "language": "Language"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "intake": "New Case",
+    "analytics": "Analytics",
+    "audit": "Audit Trail"
+  },
+  "status": {
+    "new": "New",
+    "investigating": "Investigating",
+    "needsHumanInput": "Needs Human Input",
+    "awaitingApproval": "Awaiting Approval",
+    "appealSent": "Appeal Sent",
+    "resolved": "Resolved",
+    "deniedFinal": "Denied (Final)",
+    "atRisk": "At risk"
+  },
+  "dashboard": {
+    "title": "Cases",
+    "newCase": "New Case",
+    "denialsByPayer": "Denials by payer this month",
+    "empty": "No cases yet. Start by creating one."
+  },
+  "intake": {
+    "title": "Start a new case",
+    "text": "Paste the denial letter, referral, or phone note",
+    "type": "Intake type",
+    "urgent": "Urgent (72-hour deadline)",
+    "submit": "Create case",
+    "errorEmpty": "Please add intake text or upload a file.",
+    "errorType": "Please select an intake type."
+  },
+  "case": {
+    "facts": "Extracted facts",
+    "trace": "Agent trace",
+    "actions": "Actions",
+    "confidence": "Confidence",
+    "slaCountdown": "Time remaining",
+    "approve": "Approve & Send",
+    "reject": "Reject",
+    "edit": "Edit",
+    "requestEvidence": "Request more evidence",
+    "downloadAppeal": "Download appeal PDF",
+    "verification": "Verification",
+    "flaggedIssues": "Flagged issues"
+  },
+  "analytics": {
+    "title": "Denial intelligence",
+    "byPayer": "Denials by payer",
+    "atRiskList": "At-risk cases"
+  },
+  "audit": {
+    "title": "Audit trail",
+    "export": "Export PDF",
+    "verifyChain": "Verify audit chain",
+    "intact": "Audit chain intact",
+    "tampered": "Tampering detected"
+  }
+}

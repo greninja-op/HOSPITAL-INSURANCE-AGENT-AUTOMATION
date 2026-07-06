@@ -1,29 +1,30 @@
 /**
- * AuthPilot multilingual language layer (Sarvam AI).
+ * Multilingual language layer (Sarvam AI) — AuthPilot's WhatsApp language-switching engine.
  *
- * This is the language-switching core for the WhatsApp channel. Patients rarely write in
- * clean English, so AuthPilot:
+ * This is the SINGLE primary speech/translation/detection path for the WhatsApp channel. A
+ * patient can message AuthPilot in their own language; this layer:
  *
- *   1. DETECTS the language of an inbound patient message (deterministic script detection
- *      first, with a Sarvam `/text-lid` refinement only for romanized/ambiguous Latin input),
- *   2. TRANSLATES inbound non-English text to English so the deterministic intake/router and
- *      the pipeline understand every supported language,
- *   3. LOCALIZES generic, PHI-free outbound replies/templates back into the patient's language
- *      (with register mirroring — formal vs code-mixed — so replies read naturally), and
- *   4. optionally transcribes inbound voice notes (`saarika` STT) and synthesizes spoken
- *      replies (`bulbul` TTS) for low-literacy patients.
+ *   1. DETECTS the language of inbound text — deterministic, network-free SCRIPT detection first
+ *      (Devanagari, Tamil, Telugu, …), refining romanized/ambiguous Latin-script input via Sarvam
+ *      `/text-lid` only when needed.
+ *   2. TRANSLATES inbound patient text to English (`en-IN`) so the deterministic router and the
+ *      nine-stage pipeline understand every supported language (`/translate`).
+ *   3. LOCALIZES the generic, PHI-free outbound reply back into the patient's language, mirroring
+ *      their register (formal vs code-mixed) so the reply reads naturally (`/translate`).
+ *   4. Optionally transcribes voice notes (`speech-to-text`, saarika) and synthesizes spoken
+ *      replies (`text-to-speech`, bulbul) when TTS is enabled.
  *
- * Every capability sits behind ONE injectable HTTP port ({@link SarvamFetchLike}, defaulting to
- * the global `fetch`) so the whole layer is unit/property testable with no network and no key.
- * There is no silent provider swap: on any Sarvam failure the operation returns `null` and the
- * caller degrades safely (send the untranslated English base text, ask the patient to resend a
- * voice note, etc.) rather than dropping the turn.
- *
- * Nothing here carries PHI: it only ever sees the patient's own words and the generic templates
- * AuthPilot already sends. The Sarvam API key is used as a request header and is never logged.
+ * Design rules mirrored from the config's fail-fast philosophy:
+ *   - EVERY network call goes through one injectable HTTP port ({@link SarvamFetchLike}, defaulting
+ *     to the global `fetch`) so tests drive success/failure with no real network and no API key.
+ *   - No silent wrong-provider fallback: on any Sarvam failure a method returns `null`/`undefined`.
+ *     Callers (the router) decide how to degrade — typically by sending the English base text so a
+ *     patient never receives silence.
+ *   - The API key is sent only as the `api-subscription-key` header and is NEVER logged; audit
+ *     entries carry a short, non-secret reason only.
  */
 
-/** Per-request timeout for every Sarvam call (matches the WhatsApp sender budget). */
+/** The 8s per-request timeout for every Sarvam call (matches the sender/media budget). */
 export const SARVAM_TIMEOUT_MS = 8_000;
 
 /** Default Sarvam REST base URL. Overridable for tests / self-hosted gateways. */
@@ -32,11 +33,21 @@ export const SARVAM_BASE_URL = "https://api.sarvam.ai";
 /** The translation register/mode Sarvam `/translate` supports. */
 export type TranslateMode = "formal" | "code-mixed" | "modern-colloquial" | "classic-colloquial";
 
-/** The subset of `fetch` this layer uses; the global `fetch` satisfies it. */
+/** The subset of `fetch` the language layer uses; the global `fetch` satisfies it. */
 export type SarvamFetchLike = (
   input: string,
   init?: RequestInit,
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+) => Promise<{
+  ok: boolean;
+  status: number;
+  json(): Promise<unknown>;
+}>;
+
+/** Synthesized speech bytes ready to upload to Meta `/media` and send as a voice note. */
+export interface SynthesizedSpeech {
+  readonly buffer: Buffer;
+  readonly mimeType: string;
+}
 
 /** A credential-safe audit entry describing a Sarvam failure. Never carries the API key. */
 export interface LanguageAuditEntry {
@@ -45,23 +56,17 @@ export interface LanguageAuditEntry {
   readonly reason: string;
 }
 
-/** Synthesized speech bytes ready to upload to Meta `/media` and send as a voice note. */
-export interface SynthesizedSpeech {
-  readonly buffer: Buffer;
-  readonly mimeType: string;
-}
-
 /** The result of a speech-to-text call. */
 export interface SttResult {
   /** The native transcript (in the spoken language). */
   readonly text: string;
-  /** The detected spoken language as a BCP-47 code (e.g. `hi-IN`), when Sarvam reports it. */
+  /** The detected spoken language as a BCP-47 code (e.g. `hi-IN`), when reported. */
   readonly language?: string | undefined;
 }
 
-/** The language-layer surface. Every method fails to `null` (no silent provider swap). */
+/** The Sarvam language-layer surface. Every method fails to `null`/`undefined` (no fallback). */
 export interface LanguageLayer {
-  /** Transcribe audio natively (Sarvam `saarika`) + spoken-language id. */
+  /** Transcribe audio natively (saarika) + spoken-language id. `null` on failure. */
   speechToText(
     audio: { buffer: Buffer; mimeType: string },
     languageHint?: string,
@@ -71,7 +76,7 @@ export interface LanguageLayer {
    * network); uses `/text-lid` only for romanized/ambiguous Latin-script input.
    */
   detectLanguage(text: string): Promise<string>;
-  /** Translate arbitrary patient text to English (`en-IN`) for understanding by the pipeline. */
+  /** Translate arbitrary patient text to English (`en-IN`) so the pipeline can understand it. */
   translateToEnglish(text: string, sourceLanguage?: string): Promise<string | null>;
   /** Translate an English reply into the patient's language + register/mode. */
   translateFromEnglish(
@@ -85,7 +90,7 @@ export interface LanguageLayer {
     targetLanguage: string,
     mode?: TranslateMode,
   ): Promise<string[] | null>;
-  /** Synthesize `text` to mp3 voice (Sarvam `bulbul`). Returns bytes + MIME or `null`. */
+  /** Synthesize `text` to mp3 voice (bulbul). Returns bytes + MIME or `null`. */
   textToSpeech(text: string, language: string): Promise<SynthesizedSpeech | null>;
 }
 
@@ -138,15 +143,15 @@ const SCRIPT_RANGES: ReadonlyArray<{ readonly lang: string; readonly re: RegExp 
   { lang: "ru", re: /[\u0400-\u04FF]/ }, // Cyrillic (Russian)
 ];
 
-/** True when `text` contains any non-Latin Indic script character. */
-function hasIndicScript(text: string): boolean {
+/** True when `text` contains any non-Latin script character we recognize. */
+function hasNonLatinScript(text: string): boolean {
   return SCRIPT_RANGES.some((entry) => entry.re.test(text));
 }
 
 /**
- * Deterministic, network-free language detection from the dominant script. Returns a BCP-47 code,
- * or `en-IN` when the text is pure Latin script (which may still be romanized Indic — the caller
- * can refine via {@link LanguageLayer.detectLanguage}). Pure and exported for testing.
+ * Deterministic, network-free language detection from the dominant script. Returns a BCP-47
+ * code, or `en-IN` when the text is pure Latin script (which may still be romanized Indic — the
+ * caller can refine via {@link LanguageLayer.detectLanguage}). Pure and exported for testing.
  */
 export function detectLanguageByScript(text: string): string {
   if (typeof text !== "string" || text.trim().length === 0) return "en-IN";
@@ -157,12 +162,12 @@ export function detectLanguageByScript(text: string): string {
 }
 
 /**
- * Detect code-mixing: native Indic script AND Latin letters in the same message. Drives the
+ * Detect code-mixing: native non-Latin script AND Latin letters in the same message. Drives the
  * `code-mixed` vs `formal` translate mode for register mirroring. Pure.
  */
 export function isCodeMixed(text: string): boolean {
   if (typeof text !== "string") return false;
-  return hasIndicScript(text) && /[A-Za-z]/.test(text);
+  return hasNonLatinScript(text) && /[A-Za-z]/.test(text);
 }
 
 /** Normalize a possibly-bare language code (e.g. `hi`) to a BCP-47 form (`hi-IN`). */
@@ -245,8 +250,8 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
     try {
       const form = new FormData();
       form.append("model", deps.sttModel);
-      // With a hint, lock to that language; without one, ask for AUTO-DETECT ("unknown") so any
-      // spoken language is transcribed natively and its detected language is returned.
+      // With a hint, lock to that language; without one, ask saarika to AUTO-DETECT ("unknown")
+      // so any spoken language is transcribed natively and its detected language is returned.
       form.append(
         "language_code",
         languageHint !== undefined && languageHint.length > 0
@@ -258,7 +263,7 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
       const res = await fetchImpl(`${baseUrl}/speech-to-text`, {
         method: "POST",
         headers: { ...apiKeyHeader },
-        body: form as unknown as BodyInit,
+        body: form,
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) {
@@ -267,7 +272,7 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
       }
       const json = (await res.json()) as { transcript?: unknown; language_code?: unknown } | null;
       const text = typeof json?.transcript === "string" ? json.transcript.trim() : "";
-      if (text.length === 0) return null; // No intelligible transcript → ask patient to resend.
+      if (text.length === 0) return null; // No intelligible transcript → ask to resend.
       const language =
         typeof json?.language_code === "string" && json.language_code.length > 0
           ? json.language_code
@@ -282,7 +287,7 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
   async function detectLanguage(text: string): Promise<string> {
     // (1) Script-based first — deterministic, no network.
     if (typeof text !== "string" || text.trim().length === 0) return "en-IN";
-    if (hasIndicScript(text)) {
+    if (hasNonLatinScript(text)) {
       // Devanagari may be Hindi or Marathi; refine via /text-lid when present.
       const byScript = detectLanguageByScript(text);
       if (byScript === "hi-IN") {
@@ -312,7 +317,8 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
     mode: TranslateMode,
   ): Promise<string | null> {
     if (typeof text !== "string" || text.length === 0) return text;
-    if (source === target) return text; // e.g. English→English needs no translation.
+    // Same source/target (e.g. English→English) needs no translation.
+    if (source === target) return text;
     const json = (await postJson(
       "/translate",
       {
@@ -320,7 +326,7 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
         source_language_code: source,
         target_language_code: target,
         mode,
-        numerals_format: "international", // keep digits intact (case ids, code numbers)
+        numerals_format: "international",
       },
       "translate",
     )) as { translated_text?: unknown } | null;
@@ -352,12 +358,13 @@ export function createLanguageLayer(deps: LanguageLayerDeps): LanguageLayer {
     if (target === "en-IN") return [...lines];
     const out: string[] = [];
     for (const line of lines) {
+      // Preserve blank lines verbatim so the message layout is kept.
       if (line.trim().length === 0) {
-        out.push(line); // Preserve blank lines verbatim so message layout is kept.
+        out.push(line);
         continue;
       }
       const translated = await translate(line, "en-IN", target, mode);
-      if (translated === null) return null; // A failed line fails the batch (no partial output).
+      if (translated === null) return null; // A failed line fails the batch (no fallback).
       out.push(translated);
     }
     return out;
@@ -411,4 +418,36 @@ function describeError(error: unknown): string {
     return error.name === "TimeoutError" || error.name === "AbortError" ? "timeout" : error.name;
   }
   return "unknown error";
+}
+
+// ---------------------------------------------------------------------------
+// Config-bound factory
+// ---------------------------------------------------------------------------
+
+import { type AppConfig, loadConfig } from "../config";
+
+/**
+ * Build a {@link LanguageLayer} from AuthPilot's validated config. Returns `null` when the Sarvam
+ * language layer is not configured (`SARVAM_API_KEY` unset) so the channel runs English-only.
+ * `fetch`, `baseUrl`, `timeoutMs`, and `onAudit` may be overridden (e.g. injected in tests). No
+ * real key is required to CONSTRUCT — only to call.
+ */
+export function createLanguageLayerFromConfig(
+  overrides: Partial<
+    Pick<LanguageLayerDeps, "fetch" | "baseUrl" | "timeoutMs" | "onAudit">
+  > & { config?: AppConfig } = {},
+): LanguageLayer | null {
+  const cfg = overrides.config ?? loadConfig();
+  if (!cfg.SARVAM_API_KEY) return null;
+  return createLanguageLayer({
+    apiKey: cfg.SARVAM_API_KEY,
+    sttModel: cfg.SARVAM_STT_MODEL,
+    ttsModel: cfg.SARVAM_TTS_MODEL,
+    ttsSpeaker: cfg.SARVAM_TTS_SPEAKER,
+    ttsMaxChars: cfg.SARVAM_TTS_MAX_CHARS,
+    baseUrl: overrides.baseUrl ?? cfg.SARVAM_API_BASE,
+    fetch: overrides.fetch,
+    timeoutMs: overrides.timeoutMs,
+    onAudit: overrides.onAudit,
+  });
 }
