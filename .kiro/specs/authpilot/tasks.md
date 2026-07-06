@@ -9,8 +9,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 - [ ] 1. Scaffold project and shared foundations
   - Initialize a Next.js 14 (App Router) + TypeScript project with Tailwind, shadcn/ui, Recharts, and Framer Motion
   - Add Vitest and fast-check; configure a test script and a shared fast-check config (`{ numRuns: 100 }`)
-  - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `PipelineStage`, `intakeType`, `sourceType`, `stepType` (the seven allowed values), `Recommendation`, `AppealContent`, `StrategyOption`/`StrategyOptions`, `FlaggedIssue`/`VerificationResult`, plus the hardening types `Finding`/`FindingKind`/`FindingSeverity`, `QwenOutcome`/`QwenFailure`/`QwenFailureKind`, `AuditVerifyResult`, and the status-transition types used by the case-status state machine
-  - _Requirements: 5.7, 5.8, 5.9, 23.3_
+  - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `PipelineStage`, `intakeType`, `sourceType`, `stepType` (the seven allowed values), `Recommendation`, `AppealContent`, `StrategyOption`/`StrategyOptions`, `FlaggedIssue`/`VerificationResult`, plus the hardening types `Finding`/`FindingKind`/`FindingSeverity`, `QwenOutcome`/`QwenFailure`/`QwenFailureKind`, `AuditVerifyResult`, the status-transition types used by the case-status state machine, and the Shared_Case_Action types `CaseActionType`/`CaseActionMeta`/`CaseActionResult` (mirroring the `performCaseAction` interface in the design) so both the action route and the WhatsApp router can reference them without importing each other
+  - _Requirements: 5.7, 5.8, 5.9, 23.3, 40.1_
 
 - [ ] 2. Define the data layer with Prisma
   - [ ] 2.1 Author the Prisma schema and generate the client
@@ -19,11 +19,13 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Extend `TraceStep.stepType` to allow the seven values `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`
     - Add the audit-chain fields to `TraceStep` (each Trace_Step and each `human_action` audit event): `prevHash` (String), `hash` (String), and the mutating-change capture fields `beforeState` (Json?) and `afterState` (Json?), so each audit event stores its own hash and the hash of the immediately preceding event
     - Add an `IdempotencyKey` model (`key` unique, `caseId`, `operation`, `result` Json, `createdAt`) that records a client-supplied Idempotency_Key with the stored result of the mutating operation it guarded
-    - Add the WhatsApp channel models: `ProcessedMessage` (`messageId` @id, `status`, `reservedAt`, `createdAt`) as the durable at-most-once dedupe/idempotency claim keyed by the inbound WhatsApp message id, and `WhatsAppMessage` (`id`, `caseId?`, `direction`, `sender`, `role`, `content`, `messageType`, `waMessageId?`, `timestamp`) with a `Case` relation (and the `Case.whatsappMessages WhatsAppMessage[]` reverse relation) recording every inbound/outbound channel message
-    - Add `Case.patientPhone` (String?) — an opt-in number stored only to support generic, PHI-free status lookups (carries no medical detail) — and extend the allowed `intakeType` values with `"whatsapp_patient_note"`
+    - Add the WhatsApp channel models: `ProcessedMessage` (`messageId` @id, `status`, `reservedAt`, `createdAt`) as the durable at-most-once dedupe/idempotency claim keyed by the inbound WhatsApp message id, and `WhatsAppMessage` (`id`, `caseId?`, `direction`, `sender`, `role`, `content`, `messageType`, `waMessageId?`, `providerMessageId?` (`@unique`, the inbound provider message id used for dedupe, aligning with `ProcessedMessage.messageId`/`waMessageId`), `timestamp`) with a `Case` relation (and the `Case.whatsappMessages WhatsAppMessage[]` reverse relation) recording every inbound/outbound channel message; note the `messageType` set also covers `"conversational"` (fallback replies) and `"notification"` (staff notifications) in addition to `text`/`interactive`/`button`/`image`/`audio`/`template`/`unsupported`
+    - Add the `HandoffRequest` model (`id`, `caseId?` optional linked Case, `patientPhone`, `reason`, `urgent` Boolean default false, `createdAt`) recording a request for a staff member to contact a patient directly — raised on an explicit patient request (non-urgent) or automatically on an emergency (urgent)
+    - Add `Case.patientPhone` (String?) — an opt-in number stored only to support generic, PHI-free status lookups (carries no medical detail) — and `Case.patientNameHint` (String?) — a free-text patient name from intake used only for status-by-name lookup (no PHI-bearing linkage) — and extend the allowed `intakeType` values with `"whatsapp_patient_note"`
+    - Extend the `ExtractedField.sourceType` values to include `"human_provided"` so the full set is `raw_intake | chart_note | payer_policy | code_lookup | human_provided`, carrying evidence appended by the request_more_evidence action
     - Configure the SQLite datasource by default (`datasource db { provider = "sqlite"; url = env("DATABASE_URL") }`) and add a shared Prisma client module in `lib/db.ts`
     - Add a test helper that spins up an in-memory/temporary SQLite instance for tests
-    - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3, 25.1, 25.3, 26.2, 31.6, 32.4, 36.1_
+    - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3, 25.1, 25.3, 26.2, 31.6, 32.4, 36.1, 40.9, 43.1_
 
   - [ ] 2.2 Implement the stepType validation guard
     - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
@@ -403,14 +405,14 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 50: Strategy and verification outputs persist and retrieve losslessly**
     - **Validates: Requirements 23.1, 23.2, 23.4**
 
-- [ ] 15. Implement the human-action API
+- [ ] 15. Implement the shared case action and human-action API
   - [ ] 15.1 Implement `POST /api/cases/[id]/action`
-    - Handle Approve (→ AppealSent, simulated send only), Reject (→ NeedsHumanInput), Edit (store revised content), Request More Evidence (append context, re-invoke `runAgent`); record a `human_action` Trace_Step for each; never mark sent without a recorded Approve; 400 on malformed payloads
+    - Handle Approve, Reject, Edit, and Request More Evidence by **delegating to the shared `performCaseAction(caseId, actionType, meta)` operation** (`lib/caseActions.ts`, task 15.10) with `meta.source: "dashboard"` — the route contains no case-action logic of its own and is not the writer of the `human_action` Trace_Step; map the structured `CaseActionResult` to the HTTP response (never mark sent without a recorded Approve; 400 on malformed payloads)
     - Also handle the two Case_Outcome action types for Cases in status `AppealSent`: `appeal_won` → `Resolved` and `appeal_denied` → `DeniedFinal`, setting `Case.resolvedAt` to the processing timestamp and recording a `human_action` Trace_Step describing the outcome
     - Reject any Case_Outcome action when the Case status is not `AppealSent`, leaving status and `resolvedAt` unchanged, recording no Trace_Step, and returning a message identifying that the Case must be in status `AppealSent`
     - Perform the status change, `resolvedAt` update, and Trace_Step write atomically so that a persistence failure rolls back all three effects (Case retains `AppealSent` and its prior `resolvedAt`) and returns a message indicating the outcome was not recorded
     - Accept a client-supplied `Idempotency-Key` header and wrap submission/approval/outcome/stage-advancing writes in `withIdempotency` (`lib/idempotency.ts`) so a retried request applies its effect at most once and returns the stored original result; perform every Case_Status change through `assertTransition` (`lib/caseStatus.ts`), rejecting illegal transitions and leaving status unchanged
-    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 16.1, 16.2, 24.2, 24.3, 24.4, 24.5, 24.6, 26.1, 26.4, 26.5, 28.1, 28.2, 28.5_
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 16.1, 16.2, 24.2, 24.3, 24.4, 24.5, 24.6, 26.1, 26.4, 26.5, 28.1, 28.2, 28.5, 40.1, 40.2, 40.3_
 
   - [ ]* 15.2 Write property test for approve and reject transitions
     - **Property 22: Approve and reject transitions**
@@ -446,6 +448,22 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 56: Outcome persistence failure rolls back atomically**
     - Assert that when persisting the status change, `resolvedAt`, or the Trace_Step fails, all three effects roll back (Case retains `AppealSent` and its prior `resolvedAt`, no partial Trace_Step) and a message indicating the outcome was not recorded is returned
     - **Validates: Requirements 24.5**
+
+  - [ ] 15.10 Implement the shared case action in `lib/caseActions.ts`
+    - Implement `performCaseAction(caseId, actionType, meta)` as the single shared implementation of approve/reject/edit/request_more_evidence invoked by **both** the Dashboard action route (task 15.1) and the WhatsApp staff-command handler (task 26.11), differing only in `meta.source` (`"dashboard"` | `"whatsapp"`); make it the **sole writer** of the `human_action` Trace_Step for these four transitions, recording `meta.source` as the channel source; return a structured `CaseActionResult` (`success`, `newStatus`, `message`, optional `pdfUrl`) and **never throw** — wrap the whole body so any persistence/tool error becomes `{ success: false, newStatus: <unchanged>, message }`
+    - approve → generate the `Appeal_Packet` via `generateAppealPdf` if none exists, set `AppealSent`, invoke the simulated Submission_And_Tracking step, and return the appeal location as `pdfUrl`; reject → set `NeedsHumanInput` and send a staff manual-review notification on the WhatsApp_Channel; edit → dashboard-only apply to the Case `recommendation` without a status change, and when `meta.source === "whatsapp"` refuse with a message leaving `recommendation`/`Case_Status` unchanged; request_more_evidence → append the evidence as an `Extracted_Field` with `sourceType: "human_provided"`, set `Investigating`, and re-invoke the `Agent_Runner` pipeline as a fire-and-forget re-run (consistent with Requirement 16)
+    - Apply every `Case_Status` change through `assertTransition` (`lib/caseStatus.ts`) and wrap it in `withIdempotency(meta.idempotencyKey, …)` (`lib/idempotency.ts`) so a legal transition takes effect at most once across retries/redeliveries
+    - _Requirements: 40.1, 40.2, 40.3, 40.4, 40.5, 40.6, 40.7, 40.8, 40.9, 40.10, 8.10, 16.1, 26.4, 28.1_
+
+  - [ ]* 15.11 Write property test for shared case action dispatch per action type
+    - **Property 75: Shared case action dispatches each action type correctly**
+    - Assert approve→PDF+AppealSent+submission+pdfUrl, reject→NeedsHumanInput+staff notification, edit dashboard-applied vs whatsapp-refused, request_more_evidence→`human_provided` Extracted_Field+Investigating+fire-and-forget re-run; every status change flows through `assertTransition`/`withIdempotency` and the `human_action` Trace_Step is written only here
+    - **Validates: Requirements 40.3, 40.5, 40.6, 40.7, 40.8, 40.9, 40.10, 8.10**
+
+  - [ ]* 15.12 Write property test for shared case action never throwing
+    - **Property 76: Shared case action never throws**
+    - Assert that for any `CaseActionType` and any injected persistence failure at any point, `performCaseAction` resolves to `{ success: false, message: <non-empty> }`, leaves `Case_Status` unchanged, and never propagates an exception
+    - **Validates: Requirements 40.4**
 
 - [ ] 16. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
@@ -614,10 +632,10 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 33.5, 33.6**
 
   - [ ] 26.11 Implement role-based routing in `lib/whatsapp/router.ts`
-    - Implement `resolveRole(phone, staffNumbers)` (registered `Staff_Number` ⇒ staff, else patient), `parseStaffCommand(text)` (total parser for `Approve`/`Reject`/`Status`/`Show`, non-commands → `{ kind: "none" }`), the generic PHI-free `PATIENT_TEMPLATES` set (including `needsMoreInfo` that never names the missing item), and `routeInbound(inbound, ports)` over injected `RouterPorts`
+    - Implement `resolveRole(phone, staffNumbers)` (registered `Staff_Number` ⇒ staff, else patient), `parseStaffCommand(text)` (total parser for `Approve`/`Reject`/`Status`/`Show`, non-commands → `{ kind: "none" }`), the generic PHI-free `PATIENT_TEMPLATES` set (including `needsMoreInfo` that never names the missing item), and `routeInbound(inbound, ports)` over injected `RouterPorts` (including the `performCaseAction`, `classifyMedia`, `detectEmergency`, `recordHandoff`, and `conversationalFallback` ports used by tasks 26.22–26.35)
     - Patient intake (free text or denial-letter image) → screen the text through the `Safety_Guard`, create a Case with `intakeType: "whatsapp_patient_note"` storing the message/extracted text as raw Intake, run the normal nine-stage pipeline, and reply with the `caseCreated` acknowledgement template; patient status question → look up the most recent open Case by phone and reply with a generic `statusGeneric` template (or `noOpenCase`) without re-running the pipeline
-    - Staff command from a registered `Staff_Number` → `Approve`/`Reject` perform the same `Human_Action` as the dashboard via the injected `humanAction` port with `source: "whatsapp"`, applying the status change through `assertTransition` and `withIdempotency`; `Status`/`Show` reply with a one-line summary / Case Detail link and mutate nothing; a non-staff action command is rejected without changing any Case
-    - _Requirements: 32.1, 32.2, 32.3, 32.4, 32.5, 33.1, 33.2, 33.3, 33.4, 34.1, 34.2, 34.3, 34.4, 34.5, 34.6, 34.7, 8.8, 8.9_
+    - Staff command from a registered `Staff_Number` → `Approve`/`Reject` perform the same `Human_Action` as the dashboard by **delegating to the shared `performCaseAction` operation** (`lib/caseActions.ts`, task 15.10) via the injected `performCaseAction` port with `meta.source: "whatsapp"` — the same implementation the Dashboard invokes, never a channel-local copy — which itself applies the status change through `assertTransition` and `withIdempotency`; `Status`/`Show` reply with a one-line summary / Case Detail link and mutate nothing; a non-staff action command is rejected without changing any Case
+    - _Requirements: 32.1, 32.2, 32.3, 32.4, 32.5, 33.1, 33.2, 33.3, 33.4, 34.1, 34.2, 34.3, 34.4, 34.5, 34.6, 34.7, 34.8, 8.8, 8.9, 8.10_
 
   - [ ]* 26.12 Write property test for staff-command parsing and authorization
     - **Property 70: Staff commands parse correctly and only registered numbers act**
@@ -628,8 +646,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 33.2, 33.3, 33.4, 36.3**
 
   - [ ] 26.14 Implement the port-binding composition root in `lib/whatsapp/wiring.ts`
-    - Implement `buildRouterPorts()` binding the abstract `RouterPorts` to the real in-process services: `createCase` to the case-creation logic used by `/api/cases`, `humanAction` to the logic used by `/api/cases/[id]/action`, the lookups to Prisma queries, `send` to `createSender(config)`, and `guard` to `screenUntrusted`
-    - _Requirements: 34.2, 34.6_
+    - Implement `buildRouterPorts()` binding the abstract `RouterPorts` to the real in-process services: `createCase` to the case-creation logic used by `/api/cases`, `performCaseAction` to the shared `lib/caseActions.ts` operation used by `/api/cases/[id]/action` (task 15.10), the lookups to Prisma queries, `classifyMedia` to the media gate (task 26.22), `detectEmergency` to the deterministic emergency detector (task 26.25), `recordHandoff` to the handoff store + staff broadcast (task 26.27), `conversationalFallback` to the scoped LLM fallback (task 26.29), `send` to `createSender(config)`, and `guard` to `screenUntrusted`
+    - _Requirements: 34.2, 34.6, 34.8, 40.2, 41.1, 42.4, 43.1, 44.1_
 
   - [ ] 26.15 Wire the webhook POST inbound pipeline in `app/api/whatsapp/webhook/route.ts`
     - Implement the `POST` handler pipeline: capture the raw request bytes → HMAC-verify the `X-Hub-Signature-256` header over those exact bytes (when an app secret is configured) → acknowledge fast with 200 → dedupe by inbound message id → parse to `NormalizedInbound` → route via `routeInbound(buildRouterPorts())` → reply with a template; screen inbound text through the `Safety_Guard` before any Qwen prompt, create WhatsApp-originated Cases with `intakeType: "whatsapp_patient_note"`, and write channel-originated domain actions to the same `Trace_Step`/`Audit_Chain` entries the in-app flow uses
@@ -657,6 +675,65 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - [ ]* 26.21 Write optional smoke test for the setup script
     - Assert the setup script runs against fakes without error and is a one-shot (no runtime dependency in the request path)
 
+  - [ ] 26.22 Implement the media quality gate in `lib/whatsapp/mediaGate.ts`
+    - Implement `classifyMedia(files)` returning a `MediaQualityResult` per file (`usable`, and when not usable a `reason` of `blurry`/`too_dark`/`cropped`/`not_a_document`/`wrong_document_type`, and when usable the `extractedText`); fail-safe so any thrown error in the check/extraction yields `{ usable: false }` and extraction results are not used; wire the classify → route decision into `router.ts` **before any intake**: usable → route the extracted text through the same intake path as an inbound text message; unusable → reply with corrective guidance specific to the reason and create **no Case**; when multiple media files arrive in one delivery, use the relevant document(s) and disregard clearly unrelated files
+    - _Requirements: 41.1, 41.2, 41.3, 41.4, 41.5, 41.6, 32.6_
+
+  - [ ]* 26.23 Write property test for the media quality gate route/block decision
+    - **Property 79: Media quality gate routes usable files and blocks unusable ones**
+    - Assert usable → extracted text routed through the text-intake path; unusable → no Case + reason-specific corrective reply; any check/extraction error treated as not usable (fail-safe) so extraction results are never used on error
+    - **Validates: Requirements 41.1, 41.3, 41.4, 41.5**
+
+  - [ ]* 26.24 Write integration/example test for media text extraction correctness
+    - Extract text from a sample clear image/PDF and assert non-empty extracted text is produced for a usable file; OCR/PDF extraction is I/O- and library-bound, so its correctness is covered by an integration/example test rather than a property test
+    - _Requirements: 41.4_
+
+  - [ ] 26.25 Implement the emergency short-circuit in `lib/whatsapp/emergency.ts`
+    - Implement the deterministic, **non-LLM** `detectEmergency(text)` matching a fixed set of emergency-language patterns (chest pain, difficulty breathing, severe bleeding, stroke, overdose, suicidal statements) with plain string/regex rules; wire it **FIRST** in the patient path in `router.ts` so on a match AuthPilot replies with the emergency-care template directing the patient to call 911 / go to the ER, raises an **urgent** `Handoff_Request` (task 26.27), and short-circuits — no Case is created or mutated and no later rule runs
+    - _Requirements: 42.1, 42.2, 42.3, 42.4, 43.2_
+
+  - [ ]* 26.26 Write property test for the emergency short-circuit
+    - **Property 77: Emergency language short-circuits deterministically**
+    - Assert `detectEmergency` is deterministic with no model call, and for any text it flags as emergency the router replies with the emergency template, records an urgent `Handoff_Request`, and creates/mutates no Case
+    - **Validates: Requirements 42.1, 42.2, 42.3, 42.4, 43.2**
+
+  - [ ] 26.27 Implement human handoff in `lib/whatsapp/handoff.ts`
+    - Implement `recordHandoff(req)` persisting a `HandoffRequest` row (patient phone, optional linked Case, reason, urgent flag) and broadcasting a staff notification identifying the handoff, flagged **urgent** when `req.urgent` is set; wire the router so an explicit patient request for a human raises a **non-urgent** handoff and an emergency (task 26.25) raises an **urgent** one
+    - _Requirements: 43.1, 43.2, 43.3, 43.4_
+
+  - [ ]* 26.28 Write example test for handoff staff notification
+    - Assert an explicit patient human-request records a non-urgent `HandoffRequest` and a staff notification, and an emergency-driven handoff records an urgent `HandoffRequest` whose staff notification is flagged urgent
+    - _Requirements: 43.3, 43.4_
+
+  - [ ] 26.29 Implement the conversational fallback in `lib/whatsapp/fallback.ts`
+    - Implement `conversationalFallback(input)` producing a scoped reply under a role-specific system prompt: patient scope MAY explain general concepts/process/timelines, acknowledge frustration, and ask a clarifying question, and MUST NOT state any specific denial reason/diagnosis/procedure code/dollar amount/policy detail, MUST NOT give medical advice (redirect medical questions to the patient's physician), and MUST NOT promise an outcome; staff scope MAY explain a Case's decision reasoning/status/thresholds, and MUST NOT perform any case action from free text or guess a case id; wire it in `router.ts` as the **last resort** for any inbound that matches neither a structured staff command, a clear new-case trigger, nor a status query
+    - _Requirements: 44.1, 44.2, 44.3, 44.4, 44.5, 44.6, 44.7, 32.7, 34.10_
+
+  - [ ]* 26.30 Write example/smoke tests for fallback wording and scope constraints
+    - Assert patient-scope replies stay PHI-free (no denial reason/diagnosis/code/amount/policy detail), never give medical advice or promise an outcome, and staff-scope replies never perform an action or guess a case id; the model-generated wording is validated by example/smoke tests rather than a property test
+    - _Requirements: 44.2, 44.3, 44.4, 44.5, 44.6, 44.7_
+
+  - [ ]* 26.31 Write deterministic test that routing into the fallback happens
+    - Assert that inbound messages which are non-command (staff), non-trigger, and non-status are routed into `conversationalFallback` under the correct role scope; the routing decision is deterministic and testable even though the reply wording is not
+    - _Requirements: 44.1, 32.7, 34.10_
+
+  - [ ] 26.32 Implement the staff free-text action guardrail in `lib/whatsapp/router.ts`
+    - When a staff message expresses an intent to act (e.g. "approve this", "please send it", "reject that one") **without** an exact structured command with an explicit case id, refuse: take **no case action** (never invoke `performCaseAction`), never guess a case id, and reply asking the staff member to use the structured format `Approve <case-id>` or `Reject <case-id>`; only a well-formed `parseStaffCommand` result with an explicit case id ever reaches `performCaseAction`
+    - _Requirements: 45.1, 45.2, 45.3, 34.9, 44.7_
+
+  - [ ]* 26.33 Write property test for the staff free-text action guardrail
+    - **Property 78: Staff free-text action intent is refused without a structured command**
+    - Assert that for any staff free-text action intent without an exact structured command/explicit case id, `performCaseAction` is never invoked, no Case changes, no case id is guessed, and the reply requests the `Approve <case-id>` / `Reject <case-id>` format
+    - **Validates: Requirements 45.1, 45.2, 45.3, 34.9, 44.7**
+
+  - [ ] 26.34 Implement unsupported-type and ambiguous-reply handling in `lib/whatsapp/router.ts`
+    - Unsupported inbound type (audio, video, location, sticker, contacts, or an otherwise unrecognized `kind: "unsupported"`) → reply asking the sender to resend as text, a photo, or a PDF, creating **no Case** and mutating no existing Case; ambiguous short patient reply with no clear referent and no open-Case context → reply with a clarifying question and create **no** new Case; both are terminal replies that never touch case state
+    - _Requirements: 46.1, 46.2, 47.1, 47.2_
+
+  - [ ]* 26.35 Write example tests for unsupported-type and ambiguous-reply handling
+    - Assert an unsupported-type inbound gets the resend-as-text/photo/PDF reply and creates/mutates no Case, and an ambiguous short patient reply with no open-Case context gets a clarifying question and creates no Case
+    - _Requirements: 46.1, 46.2, 47.1, 47.2_
+
 - [ ] 27. Implement voice transcript intake
   - [ ] 27.1 Implement `transcriptToIntake` in `lib/voice/transcriptIntake.ts` and wire a transcript entrypoint
     - Implement the pure `transcriptToIntake(t)` mapping a `Voice_Transcript` to `{ rawText, intakeType: "phone_note" }`, and wire a transcript intake entrypoint that feeds the result through the same create-Case path as any other `phone_note` intake and runs the normal nine-stage pipeline; no real-time media or telephony processing is introduced
@@ -681,10 +758,12 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation tasks are never optional.
-- Each task references specific granular requirements for traceability, and every one of the 74 correctness properties maps to exactly one property-based test sub-task.
+- Each task references specific granular requirements for traceability, and every one of the 79 correctness properties maps to exactly one property-based test sub-task.
 - Property-based tests use fast-check with Vitest at ≥100 iterations, tagged `// Feature: authpilot, Property {number}: {property_text}`; Qwen and the NIH API are replaced with deterministic fakes and the database uses an in-memory/temporary SQLite instance. Stage parallelism (Property 37) is validated with instrumented per-stage start/end timestamps rather than wall-clock timing. Qwen degradation on a structured failure (Requirement 6.9) is covered by an example test that feeds a `QwenFailure` into the runner and asserts Escalate_To_Human / NeedsHumanInput.
 - Architectural/wiring guarantees (Requirements 5.2, 7.2, 17.3, 20.3, 20.11, 20.12) and UI stage labeling / flagged-issue rendering (Requirements 11.5, 20.7–20.10, 22.6) are covered by smoke/example/component tests rather than property tests, consistent with the design's testing strategy.
 - Data-store portability (Requirement 39), voice transcript intake (Requirement 37), the WhatsApp channel audit (Requirement 36.1) and staff notifications (Requirement 35), the one-off WhatsApp setup script, and the CI/deploy/boot-config operations are covered by smoke/example/setup tests rather than property tests, since they carry no numbered correctness property beyond config Properties 73 and 74.
+- The shared case action `performCaseAction` (`lib/caseActions.ts`) is the single implementation of approve/reject/edit/request_more_evidence and the sole writer of the `human_action` Trace_Step; both the Dashboard action route (task 15.1) and the WhatsApp staff-command handler (task 26.11) delegate to it, so the two channels can never drift or double-log. Properties 75 and 76 cover its per-action dispatch and its no-throw contract.
+- The advanced WhatsApp behaviors add Properties 77 (emergency short-circuit), 78 (staff free-text action guardrail), and 79 (media quality gate route/block). Emergency detection (Requirement 42.4) and the media route/block decision are deterministic and property-tested; media text extraction (OCR/PDF) is library-bound and covered by an integration/example test; the conversational fallback wording (Requirement 44) is model-generated and covered by example/smoke tests, while the deterministic routing decision *into* the fallback is separately tested; the handoff notification (Requirement 43) and the unsupported-type/ambiguous-reply replies (Requirements 46, 47) are covered by example tests, since they carry no numbered property.
 - UI, library-bound (PDF/text extraction), and one-shot setup behaviors are covered by component, integration, and smoke tests rather than property tests.
 - Checkpoints ensure incremental validation at natural boundaries (pure logic, tools/PDF, the nine-stage runner, APIs, and final).
 
@@ -700,14 +779,14 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     { "id": 4, "tasks": ["7.7", "10.2", "10.3", "10.4", "10.6", "10.7", "10.8", "10.10", "26.4"] },
     { "id": 5, "tasks": ["7.8", "7.9", "11.3", "23.1", "23.3", "23.5", "23.9"] },
     { "id": 6, "tasks": ["11.1", "11.4", "23.2", "23.4", "23.6", "23.7", "23.8", "23.10", "26.11"] },
-    { "id": 7, "tasks": ["11.2", "11.5", "13.1", "26.12", "26.13"] },
-    { "id": 8, "tasks": ["11.6", "11.7", "11.32", "13.2", "13.3", "13.4"] },
-    { "id": 9, "tasks": ["11.8", "11.9"] },
-    { "id": 10, "tasks": ["11.10", "11.11", "11.12", "11.13"] },
-    { "id": 11, "tasks": ["11.14", "11.15"] },
-    { "id": 12, "tasks": ["11.16", "11.17", "11.18"] },
-    { "id": 13, "tasks": ["11.19", "11.20", "11.21", "11.22", "11.23", "11.33"] },
-    { "id": 14, "tasks": ["11.24", "11.25", "15.1"] },
+    { "id": 7, "tasks": ["11.2", "11.5", "13.1", "26.12", "26.13", "15.10"] },
+    { "id": 8, "tasks": ["11.6", "11.7", "11.32", "13.2", "13.3", "13.4", "15.11", "15.12", "26.22"] },
+    { "id": 9, "tasks": ["11.8", "11.9", "26.23", "26.24", "26.25"] },
+    { "id": 10, "tasks": ["11.10", "11.11", "11.12", "11.13", "26.26", "26.27"] },
+    { "id": 11, "tasks": ["11.14", "11.15", "26.28", "26.29"] },
+    { "id": 12, "tasks": ["11.16", "11.17", "11.18", "26.30", "26.31", "26.32"] },
+    { "id": 13, "tasks": ["11.19", "11.20", "11.21", "11.22", "11.23", "11.33", "26.33", "26.34"] },
+    { "id": 14, "tasks": ["11.24", "11.25", "15.1", "26.35"] },
     { "id": 15, "tasks": ["11.26", "11.27", "11.28", "11.29", "11.30", "11.31", "15.2", "15.3", "15.4", "15.5", "15.6", "15.7", "15.8", "15.9"] },
     { "id": 16, "tasks": ["17.1", "18.1", "19.1", "20.1", "21.1", "22.1", "24.1"] },
     { "id": 17, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2", "24.2"] },
