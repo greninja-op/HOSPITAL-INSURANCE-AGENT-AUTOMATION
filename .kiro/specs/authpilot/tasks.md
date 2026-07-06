@@ -19,9 +19,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Extend `TraceStep.stepType` to allow the seven values `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`
     - Add the audit-chain fields to `TraceStep` (each Trace_Step and each `human_action` audit event): `prevHash` (String), `hash` (String), and the mutating-change capture fields `beforeState` (Json?) and `afterState` (Json?), so each audit event stores its own hash and the hash of the immediately preceding event
     - Add an `IdempotencyKey` model (`key` unique, `caseId`, `operation`, `result` Json, `createdAt`) that records a client-supplied Idempotency_Key with the stored result of the mutating operation it guarded
-    - Configure SQLite datasource and add a shared Prisma client module in `lib/db.ts`
+    - Add the WhatsApp channel models: `ProcessedMessage` (`messageId` @id, `status`, `reservedAt`, `createdAt`) as the durable at-most-once dedupe/idempotency claim keyed by the inbound WhatsApp message id, and `WhatsAppMessage` (`id`, `caseId?`, `direction`, `sender`, `role`, `content`, `messageType`, `waMessageId?`, `timestamp`) with a `Case` relation (and the `Case.whatsappMessages WhatsAppMessage[]` reverse relation) recording every inbound/outbound channel message
+    - Add `Case.patientPhone` (String?) — an opt-in number stored only to support generic, PHI-free status lookups (carries no medical detail) — and extend the allowed `intakeType` values with `"whatsapp_patient_note"`
+    - Configure the SQLite datasource by default (`datasource db { provider = "sqlite"; url = env("DATABASE_URL") }`) and add a shared Prisma client module in `lib/db.ts`
     - Add a test helper that spins up an in-memory/temporary SQLite instance for tests
-    - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3, 25.1, 25.3, 26.2_
+    - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3, 25.1, 25.3, 26.2, 31.6, 32.4, 36.1_
 
   - [ ] 2.2 Implement the stepType validation guard
     - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
@@ -31,6 +33,14 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 51: Trace step type restriction**
     - **Validates: Requirements 23.3, 23.6**
     - Use the stepType generator (values inside and outside the seven allowed values)
+
+  - [ ] 2.4 Configure data-store portability (SQLite default, single-switch PostgreSQL)
+    - Keep a single Prisma `datasource db` with `provider = "sqlite"` by default and `url = env("DATABASE_URL")`; ensure no model uses a SQLite-only construct and that `Json` columns map transparently to `TEXT`/`JSONB`, so switching to PostgreSQL is a single configuration change (set the datasource `provider` to `"postgresql"` and point `DATABASE_URL` at Postgres) with no change to application logic
+    - _Requirements: 39.1, 39.2_
+
+  - [ ]* 2.5 Write smoke/architectural test for data-store portability
+    - Assert the schema declares one datasource whose provider is the only thing that changes between SQLite and PostgreSQL and that no model relies on a provider-specific construct, so a provider + `DATABASE_URL` switch requires no code change (Requirement 39 is smoke-tested, not a numbered property)
+    - _Requirements: 39.1, 39.2_
 
 - [ ] 3. Implement the Decision_Engine (pure logic)
   - [ ] 3.1 Implement `decide()` in `lib/decisionEngine.ts`
@@ -548,15 +558,133 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 65: Gold-case evaluation passes iff path and triggering findings match**
     - **Validates: Requirements 30.2, 30.3, 30.4**
 
-- [ ] 25. Final checkpoint - Ensure all tests pass
+- [ ] 25. Implement application configuration validation
+  - [ ] 25.1 Implement the fail-fast config loader in `lib/config.ts`
+    - Implement `loadConfig(env)` with Zod: require `QWEN_API_KEY`, `QWEN_API_BASE` (URL), and `DATABASE_URL`; treat the four WhatsApp keys (`WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`) as an all-or-nothing group; on failure fail fast with a message naming every missing/invalid key, treating any strict non-empty subset of the WhatsApp group as a validation failure
+    - Expose `whatsappEnabled(cfg)` returning true iff the `whatsapp` block is present (all four WhatsApp keys set); implement `redactedSummary(cfg)` mapping each configuration key to only `"set"` or `"missing"` and never emitting any secret value; invoke `loadConfig` once at boot so misconfiguration is caught immediately
+    - _Requirements: 38.1, 38.2, 38.3, 38.4_
+
+  - [ ]* 25.2 Write property test for fail-fast, all-or-nothing config validation
+    - **Property 73: Config validation is fail-fast and all-or-nothing**
+    - **Validates: Requirements 38.1, 38.2, 38.3**
+
+  - [ ]* 25.3 Write property test for the secret-free config summary
+    - **Property 74: Config summary never leaks a secret**
+    - **Validates: Requirements 38.4**
+
+- [ ] 26. Implement the WhatsApp channel
+  - [ ] 26.1 Implement request-signature verification in `lib/whatsapp/signature.ts`
+    - Implement `computeSignatureHeader(rawBody, appSecret)` producing the `sha256=<hex>` HMAC over the exact raw bytes, and `verifySignatureWithSecret(rawBody, presentedHeader, appSecret)` doing a constant-time compare that returns `false` (never throws) on any body/secret/signature alteration or malformed/wrong-length header
+    - _Requirements: 31.3, 31.4_
+
+  - [ ]* 26.2 Write property test for exact signature verification
+    - **Property 66: WhatsApp signature verification is exact**
+    - **Validates: Requirements 31.3, 31.4**
+
+  - [ ] 26.3 Implement the GET verify handshake in `app/api/whatsapp/webhook/route.ts`
+    - Add the `runtime = "nodejs"` route and its `GET` handler that compares the presented verify token against the configured verify token and echoes the presented challenge only when they match, rejecting (returning no challenge) otherwise
+    - _Requirements: 31.1, 31.2_
+
+  - [ ]* 26.4 Write property test for the verify handshake
+    - **Property 67: WhatsApp verify handshake matches tokens exactly**
+    - **Validates: Requirements 31.1, 31.2**
+
+  - [ ] 26.5 Implement two-layer inbound dedupe in `lib/whatsapp/dedupe.ts`
+    - Implement `createDedupe()` with a process-local ring buffer (fast path) plus a durable Prisma `ProcessedMessage` claim: `claim(messageId)` atomically wins at most once per id (subsequent claims fail), `markProcessed`/`release` manage claim state, and the durable layer fails open (returns true) on a store error so a fault never silently drops a message
+    - _Requirements: 31.6_
+
+  - [ ]* 26.6 Write property test for at-most-once inbound dedupe
+    - **Property 68: Inbound dedupe is idempotent (at most once)**
+    - **Validates: Requirements 31.6**
+
+  - [ ] 26.7 Implement the total inbound parser in `lib/whatsapp/parseInbound.ts`
+    - Implement `extractInboundMessages(payload)` to flatten a provider webhook envelope into individual messages and the total `parseInbound(raw, phoneNumberId)` mapping each raw message to exactly one `NormalizedInbound`, classifying unknown/unclassifiable messages as `kind: "unsupported"` with an empty `body` rather than dropping or throwing
+    - _Requirements: 32.1, 32.2_
+
+  - [ ]* 26.8 Write property test for the total inbound parser
+    - **Property 69: Inbound parser is total**
+    - **Validates: Requirements 32.1, 32.2**
+
+  - [ ] 26.9 Implement outbound sending with window fallback in `lib/whatsapp/sender.ts`
+    - Implement `createSender(config)` exposing `sendText`, `sendTemplate`, `sendInteractiveButtons`, and `sendWithWindowFallback`, plus `isWindowClosed(err)`; apply an 8-second timeout per outbound call; on a closed-window failure, re-attempt exactly once using an approved template and then stop (never an automatic resend loop); a successful in-window attempt makes no fallback attempt
+    - _Requirements: 33.4, 33.5, 33.6_
+
+  - [ ]* 26.10 Write property test for the closed-window single re-attempt
+    - **Property 72: Closed-window fallback re-attempts at most once**
+    - **Validates: Requirements 33.5, 33.6**
+
+  - [ ] 26.11 Implement role-based routing in `lib/whatsapp/router.ts`
+    - Implement `resolveRole(phone, staffNumbers)` (registered `Staff_Number` ⇒ staff, else patient), `parseStaffCommand(text)` (total parser for `Approve`/`Reject`/`Status`/`Show`, non-commands → `{ kind: "none" }`), the generic PHI-free `PATIENT_TEMPLATES` set (including `needsMoreInfo` that never names the missing item), and `routeInbound(inbound, ports)` over injected `RouterPorts`
+    - Patient intake (free text or denial-letter image) → screen the text through the `Safety_Guard`, create a Case with `intakeType: "whatsapp_patient_note"` storing the message/extracted text as raw Intake, run the normal nine-stage pipeline, and reply with the `caseCreated` acknowledgement template; patient status question → look up the most recent open Case by phone and reply with a generic `statusGeneric` template (or `noOpenCase`) without re-running the pipeline
+    - Staff command from a registered `Staff_Number` → `Approve`/`Reject` perform the same `Human_Action` as the dashboard via the injected `humanAction` port with `source: "whatsapp"`, applying the status change through `assertTransition` and `withIdempotency`; `Status`/`Show` reply with a one-line summary / Case Detail link and mutate nothing; a non-staff action command is rejected without changing any Case
+    - _Requirements: 32.1, 32.2, 32.3, 32.4, 32.5, 33.1, 33.2, 33.3, 33.4, 34.1, 34.2, 34.3, 34.4, 34.5, 34.6, 34.7, 8.8, 8.9_
+
+  - [ ]* 26.12 Write property test for staff-command parsing and authorization
+    - **Property 70: Staff commands parse correctly and only registered numbers act**
+    - **Validates: Requirements 34.1, 34.7**
+
+  - [ ]* 26.13 Write property test for PHI-free patient outbound templates
+    - **Property 71: Patient outbound is always a PHI-free template**
+    - **Validates: Requirements 33.2, 33.3, 33.4, 36.3**
+
+  - [ ] 26.14 Implement the port-binding composition root in `lib/whatsapp/wiring.ts`
+    - Implement `buildRouterPorts()` binding the abstract `RouterPorts` to the real in-process services: `createCase` to the case-creation logic used by `/api/cases`, `humanAction` to the logic used by `/api/cases/[id]/action`, the lookups to Prisma queries, `send` to `createSender(config)`, and `guard` to `screenUntrusted`
+    - _Requirements: 34.2, 34.6_
+
+  - [ ] 26.15 Wire the webhook POST inbound pipeline in `app/api/whatsapp/webhook/route.ts`
+    - Implement the `POST` handler pipeline: capture the raw request bytes → HMAC-verify the `X-Hub-Signature-256` header over those exact bytes (when an app secret is configured) → acknowledge fast with 200 → dedupe by inbound message id → parse to `NormalizedInbound` → route via `routeInbound(buildRouterPorts())` → reply with a template; screen inbound text through the `Safety_Guard` before any Qwen prompt, create WhatsApp-originated Cases with `intakeType: "whatsapp_patient_note"`, and write channel-originated domain actions to the same `Trace_Step`/`Audit_Chain` entries the in-app flow uses
+    - _Requirements: 31.3, 31.4, 31.5, 31.6, 31.7, 36.2, 36.3, 1.10, 1.11_
+
+  - [ ] 26.16 Record channel messages in the WhatsApp channel audit
+    - On every inbound and outbound WhatsApp message, persist a `WhatsAppMessage` row capturing direction, sender, role, content (template id / generic text for patient outbound), message type, provider message id, timestamp, and linked Case where applicable
+    - _Requirements: 36.1_
+
+  - [ ]* 26.17 Write example test for WhatsApp channel audit recording
+    - Assert an inbound and an outbound message each produce a `WhatsAppMessage` row with the correct direction, role, message type, and linked Case
+    - _Requirements: 36.1_
+
+  - [ ] 26.18 Implement WhatsApp staff notifications
+    - Send staff notification `WhatsApp_Message`s to the registered `Staff_Number` for: a new Case created from a patient message, a Case reaching `AwaitingApproval` (one-line Decision_Intelligence summary + overall Confidence_Score), an approaching SLA_Clock deadline, and a Verification_QA-flagged issue requiring manual review
+    - _Requirements: 35.1, 35.2, 35.3, 35.4_
+
+  - [ ]* 26.19 Write example test for staff notifications
+    - Assert each of the four notification triggers sends a staff notification with the expected generic content
+    - _Requirements: 35.1, 35.2, 35.3, 35.4_
+
+  - [ ] 26.20 Implement the one-off WhatsApp setup automation in `scripts/setup-whatsapp.ts`
+    - Provide a conversational one-off setup script that configures the WhatsApp channel (webhook subscription, template registration) using the loaded config; no strict acceptance requirement (setup/ops)
+
+  - [ ]* 26.21 Write optional smoke test for the setup script
+    - Assert the setup script runs against fakes without error and is a one-shot (no runtime dependency in the request path)
+
+- [ ] 27. Implement voice transcript intake
+  - [ ] 27.1 Implement `transcriptToIntake` in `lib/voice/transcriptIntake.ts` and wire a transcript entrypoint
+    - Implement the pure `transcriptToIntake(t)` mapping a `Voice_Transcript` to `{ rawText, intakeType: "phone_note" }`, and wire a transcript intake entrypoint that feeds the result through the same create-Case path as any other `phone_note` intake and runs the normal nine-stage pipeline; no real-time media or telephony processing is introduced
+    - _Requirements: 37.1, 37.2_
+
+  - [ ]* 27.2 Write example/smoke test for transcript intake
+    - Assert a submitted transcript becomes a `phone_note` intake that runs the normal pipeline and that no telephony / real-time-media module is required (37.2 is smoke-tested, not a numbered property)
+    - _Requirements: 37.1, 37.2_
+
+- [ ] 28. Wire CI, deployment, and configuration operations
+  - [ ] 28.1 Wire CI, deploy config, portability, and boot-time config validation
+    - Configure CI to run typecheck, lint, tests (including the fast-check property tests) and the gold-eval, and the build; add Vercel deploy configuration; provide an optional Postgres `docker-compose` plus the documented single provider + `DATABASE_URL` switch (no logic change); add `.env.example` enumerating the required and WhatsApp configuration keys; invoke `loadConfig` at boot so configuration is validated fail-fast
+    - _Requirements: 38.1, 38.2, 38.3, 38.4, 39.1, 39.2_
+
+  - [ ]* 28.2 Write smoke/setup checks for CI and boot configuration
+    - Assert the CI pipeline runs typecheck/lint/test/gold-eval/build and that boot fails fast on missing/invalid configuration; ops/config behaviors are covered by smoke/setup tests (no new numbered properties beyond 73/74)
+    - _Requirements: 38.1, 38.2, 39.1, 39.2_
+
+- [ ] 29. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation tasks are never optional.
-- Each task references specific granular requirements for traceability, and every one of the 65 correctness properties maps to exactly one property-based test sub-task.
+- Each task references specific granular requirements for traceability, and every one of the 74 correctness properties maps to exactly one property-based test sub-task.
 - Property-based tests use fast-check with Vitest at ≥100 iterations, tagged `// Feature: authpilot, Property {number}: {property_text}`; Qwen and the NIH API are replaced with deterministic fakes and the database uses an in-memory/temporary SQLite instance. Stage parallelism (Property 37) is validated with instrumented per-stage start/end timestamps rather than wall-clock timing. Qwen degradation on a structured failure (Requirement 6.9) is covered by an example test that feeds a `QwenFailure` into the runner and asserts Escalate_To_Human / NeedsHumanInput.
 - Architectural/wiring guarantees (Requirements 5.2, 7.2, 17.3, 20.3, 20.11, 20.12) and UI stage labeling / flagged-issue rendering (Requirements 11.5, 20.7–20.10, 22.6) are covered by smoke/example/component tests rather than property tests, consistent with the design's testing strategy.
+- Data-store portability (Requirement 39), voice transcript intake (Requirement 37), the WhatsApp channel audit (Requirement 36.1) and staff notifications (Requirement 35), the one-off WhatsApp setup script, and the CI/deploy/boot-config operations are covered by smoke/example/setup tests rather than property tests, since they carry no numbered correctness property beyond config Properties 73 and 74.
 - UI, library-bound (PDF/text extraction), and one-shot setup behaviors are covered by component, integration, and smoke tests rather than property tests.
 - Checkpoints ensure incremental validation at natural boundaries (pure logic, tools/PDF, the nine-stage runner, APIs, and final).
 
@@ -566,13 +694,13 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 {
   "waves": [
     { "id": 0, "tasks": ["1.1"] },
-    { "id": 1, "tasks": ["2.1"] },
-    { "id": 2, "tasks": ["2.2", "3.1", "3.3", "4.1", "6.1", "7.1", "7.5", "8.1", "14.1", "14.3", "14.5", "14.8"] },
-    { "id": 3, "tasks": ["2.3", "3.2", "3.4", "4.2", "4.3", "6.2", "6.3", "7.2", "7.3", "7.4", "7.6", "8.2", "8.3", "10.1", "10.5", "10.9", "14.2", "14.4", "14.6", "14.7", "14.9", "14.10", "14.11", "14.12"] },
-    { "id": 4, "tasks": ["7.7", "10.2", "10.3", "10.4", "10.6", "10.7", "10.8", "10.10"] },
+    { "id": 1, "tasks": ["2.1", "25.1"] },
+    { "id": 2, "tasks": ["2.2", "2.4", "3.1", "3.3", "4.1", "6.1", "7.1", "7.5", "8.1", "14.1", "14.3", "14.5", "14.8", "26.1", "26.5", "26.7", "26.9"] },
+    { "id": 3, "tasks": ["2.3", "2.5", "3.2", "3.4", "4.2", "4.3", "6.2", "6.3", "7.2", "7.3", "7.4", "7.6", "8.2", "8.3", "10.1", "10.5", "10.9", "14.2", "14.4", "14.6", "14.7", "14.9", "14.10", "14.11", "14.12", "25.2", "25.3", "26.2", "26.3", "26.6", "26.8", "26.10"] },
+    { "id": 4, "tasks": ["7.7", "10.2", "10.3", "10.4", "10.6", "10.7", "10.8", "10.10", "26.4"] },
     { "id": 5, "tasks": ["7.8", "7.9", "11.3", "23.1", "23.3", "23.5", "23.9"] },
-    { "id": 6, "tasks": ["11.1", "11.4", "23.2", "23.4", "23.6", "23.7", "23.8", "23.10"] },
-    { "id": 7, "tasks": ["11.2", "11.5", "13.1"] },
+    { "id": 6, "tasks": ["11.1", "11.4", "23.2", "23.4", "23.6", "23.7", "23.8", "23.10", "26.11"] },
+    { "id": 7, "tasks": ["11.2", "11.5", "13.1", "26.12", "26.13"] },
     { "id": 8, "tasks": ["11.6", "11.7", "11.32", "13.2", "13.3", "13.4"] },
     { "id": 9, "tasks": ["11.8", "11.9"] },
     { "id": 10, "tasks": ["11.10", "11.11", "11.12", "11.13"] },
@@ -582,7 +710,10 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     { "id": 14, "tasks": ["11.24", "11.25", "15.1"] },
     { "id": 15, "tasks": ["11.26", "11.27", "11.28", "11.29", "11.30", "11.31", "15.2", "15.3", "15.4", "15.5", "15.6", "15.7", "15.8", "15.9"] },
     { "id": 16, "tasks": ["17.1", "18.1", "19.1", "20.1", "21.1", "22.1", "24.1"] },
-    { "id": 17, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2", "24.2"] }
+    { "id": 17, "tasks": ["17.2", "18.2", "19.2", "20.2", "21.2", "22.2", "24.2"] },
+    { "id": 18, "tasks": ["26.14", "26.16", "26.18", "27.1", "28.1"] },
+    { "id": 19, "tasks": ["26.15", "26.20"] },
+    { "id": 20, "tasks": ["26.17", "26.19", "26.21", "27.2", "28.2"] }
   ]
 }
 ```
