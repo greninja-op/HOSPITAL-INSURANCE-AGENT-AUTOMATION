@@ -1,0 +1,10 @@
+{
+  "id": "gold-draft-request-evidence",
+  "intake": {
+    "text": "Denial letter for procedure 29881. Denial reason: insufficient documentation of conservative treatment. The claim is otherwise consistent, but the payer is missing the physical therapy records; please provide the prior 6 weeks of PT notes to support medical necessity.",
+    "intakeType": "denial_letter",
+    "urgent": false
+  },
+  "expectedResolutionPath": "Draft_And_Request_Evidence",
+  "expectedTriggeringFindingIds": ["gap:missing-evidence:gold-draft-request-evidence"]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "gold-escalate-multi-contradiction",
+  "intake": {
+    "text": "Denial letter for procedure 15734. The documented diagnosis mismatch contradicts the billed code, and the service is excluded under the plan as a non-covered cosmetic benefit per policy exclusion 4.2.",
+    "intakeType": "denial_letter",
+    "urgent": true
+  },
+  "expectedResolutionPath": "Escalate_To_Human",
+  "expectedTriggeringFindingIds": [
+    "contradiction:dx-mismatch:gold-escalate-multi-contradiction",
+    "policy:coverage-exclusion:gold-escalate-multi-contradiction"
+  ]
+}

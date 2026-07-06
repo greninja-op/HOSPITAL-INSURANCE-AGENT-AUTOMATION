@@ -1,0 +1,10 @@
+{
+  "id": "gold-escalate-low-confidence",
+  "intake": {
+    "text": "Scanned denial letter is largely illegible and the payer reason is unclear; key fields could not be determined from the garbled fax and the procedure code is ambiguous.",
+    "intakeType": "denial_letter",
+    "urgent": false
+  },
+  "expectedResolutionPath": "Escalate_To_Human",
+  "expectedTriggeringFindingIds": []
+}

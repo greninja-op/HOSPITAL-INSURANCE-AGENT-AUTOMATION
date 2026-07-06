@@ -1,0 +1,10 @@
+{
+  "id": "gold-escalate-contradiction",
+  "intake": {
+    "text": "Denial letter for procedure 29881. The requested procedure code contradicts the documented diagnosis: the chart shows a shoulder diagnosis while the claim lists a knee procedure. This diagnosis mismatch must be resolved before any appeal is drafted.",
+    "intakeType": "denial_letter",
+    "urgent": false
+  },
+  "expectedResolutionPath": "Escalate_To_Human",
+  "expectedTriggeringFindingIds": ["contradiction:dx-mismatch:gold-escalate-contradiction"]
+}

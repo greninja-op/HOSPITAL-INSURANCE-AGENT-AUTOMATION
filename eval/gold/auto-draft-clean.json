@@ -1,0 +1,10 @@
+{
+  "id": "gold-auto-draft-clean",
+  "intake": {
+    "text": "Denial letter from PayerCo for procedure 29881 (knee arthroscopy). Denial reason: prior authorization not on file. Chart notes confirm the documented diagnosis M23.205 matches the requested procedure, the operative report is attached, and medical necessity criteria are fully met. All references reconcile.",
+    "intakeType": "denial_letter",
+    "urgent": false
+  },
+  "expectedResolutionPath": "Auto_Draft",
+  "expectedTriggeringFindingIds": []
+}

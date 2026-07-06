@@ -266,6 +266,29 @@ export type ToolName =
   | "generateAppealPdf";
 
 /**
+ * Stage-scoped tool allow-lists (Requirements 3.8, 3.9). `dispatchTool` permits
+ * a tool ONLY when it appears in the active stage's list; any other tool is
+ * refused with a failure `Trace_Step` and an error observation (never thrown).
+ *
+ * This is the AUTHORITATIVE enforcement map. `lib/agentRunner.ts` keeps a
+ * mirror (`STAGE_TOOL_ALLOWLIST`) used only for prompt exposure — the two must
+ * stay consistent. Notable restrictions:
+ *   • Medical_Review → `fetchPatientRecord` only (Req 3.8 — chart only)
+ *   • Policy_Review  → `fetchPayerPolicy` only  (Req 3.9 — policy only)
+ */
+export const STAGE_TOOLS: Record<PipelineStage, ToolName[]> = {
+  Intake_And_Extraction: ["lookupDiagnosisCode"],
+  Medical_Review: ["fetchPatientRecord"], // Req 3.8 — chart only
+  Policy_Review: ["fetchPayerPolicy"], // Req 3.9 — policy only
+  Strategy: ["checkPriorAuthHistory", "fetchPayerPolicy"], // history + payer diff input (Req 17.3)
+  Decision_Intelligence: [], // pure reasoning over summaries (Req 5.2)
+  Appeal_Generation: ["generateAppealPdf"],
+  Verification_QA: ["fetchPatientRecord", "fetchPayerPolicy"], // re-read to verify (Req 22)
+  Human_Approval: [],
+  Submission_And_Tracking: [],
+};
+
+/**
  * The observation returned to the agent loop for a single tool invocation.
  * `dispatchTool` NEVER throws: a failed tool resolves to `{ ok: false, error }`
  * so the loop can continue (Requirement 3.6).
@@ -363,11 +386,14 @@ async function invokeTool(
  * The persistence dependency is injectable via `deps.persistTraceStep` (default
  * `createTraceStep`) for testability.
  *
- * EXTENSION POINT (Task 11.3 — stage-scoped allow-lists): the optional `stage`
- * parameter is threaded through so a later task can gate dispatch on a
- * per-stage `STAGE_TOOLS` allow-list — refusing (and recording a failure
- * `Trace_Step` for) any tool not permitted in the active stage (Requirements
- * 3.8, 3.9). The base dispatch here does NOT yet enforce any allow-list.
+ * STAGE-SCOPED ALLOW-LISTS (Task 11.3 — Requirements 3.8, 3.9): when a `stage`
+ * is supplied, dispatch permits a tool ONLY when it is in that stage's
+ * `STAGE_TOOLS` allow-list. A tool not permitted in the active stage is refused
+ * BEFORE invocation: dispatch records a failure `"tool_call"` Trace_Step and
+ * returns an error observation instead of running the tool (and never throws).
+ * In particular Medical_Review permits only `fetchPatientRecord` (Req 3.8) and
+ * Policy_Review permits only `fetchPayerPolicy` (Req 3.9). When `stage` is
+ * omitted no allow-list is enforced (all known tools are dispatchable).
  */
 export async function dispatchTool(
   name: string,
@@ -378,6 +404,31 @@ export async function dispatchTool(
 ): Promise<ToolObservation> {
   const persistTraceStep = deps.persistTraceStep ?? createTraceStep;
   const stageLabel = stage ? ` during ${stage}` : "";
+
+  // Stage-scoped enforcement (Req 3.8, 3.9): refuse any tool not in the active
+  // stage's allow-list before invoking it. Record a failure Trace_Step and
+  // return an error observation — never throw.
+  if (stage && !STAGE_TOOLS[stage].includes(name as ToolName)) {
+    const error = `Tool "${name}" is not permitted during ${stage}.`;
+    try {
+      await persistTraceStep({
+        caseId,
+        stepType: "tool_call",
+        toolName: name,
+        input: toJsonValue(args),
+        output: toJsonValue({ error }),
+        reasoning: `Tool "${name}"${stageLabel} refused: not in the ${stage} allow-list.`,
+      });
+    } catch (persistErr) {
+      const detail =
+        persistErr instanceof Error ? persistErr.message : String(persistErr);
+      console.error(
+        `[dispatchTool] Failed to record refusal Trace_Step for tool "${name}": ${detail}`,
+      );
+    }
+
+    return { ok: false, tool: name, error };
+  }
 
   try {
     const result = await invokeTool(name, args, caseId);

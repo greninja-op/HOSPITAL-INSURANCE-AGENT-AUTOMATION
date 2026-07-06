@@ -55,5 +55,13 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans), "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+  code,
+  pre,
+  kbd,
+  samp {
+    font-family: var(--font-mono), "JetBrains Mono", ui-monospace,
+      SFMono-Regular, monospace;
   }
 }
