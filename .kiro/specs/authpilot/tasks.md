@@ -27,7 +27,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Add a test helper that spins up an in-memory/temporary SQLite instance for tests
     - _Requirements: 2.2, 2.7, 2.8, 9.1, 14.1, 23.1, 23.2, 23.3, 25.1, 25.3, 26.2, 31.6, 32.4, 36.1, 40.9, 43.1_
 
-  - [-] 2.2 Implement the stepType validation guard
+  - [x] 2.2 Implement the stepType validation guard
     - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
     - _Requirements: 23.3, 23.6_
 
@@ -44,7 +44,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert the schema declares one datasource whose provider is the only thing that changes between SQLite and PostgreSQL and that no model relies on a provider-specific construct, so a provider + `DATABASE_URL` switch requires no code change (Requirement 39 is smoke-tested, not a numbered property)
     - _Requirements: 39.1, 39.2_
 
-- [ ] 3. Implement the Decision_Engine (pure logic)
+- [x] 3. Implement the Decision_Engine (pure logic)
   - [x] 3.1 Implement `decide()` in `lib/decisionEngine.ts`
     - Evaluate rules in order: iterations-exhausted OR contradictionCount > 0 → Escalate_To_Human (NeedsHumanInput); confidence > 85 → Auto_Draft (AwaitingApproval); 60 ≤ confidence ≤ 85 → Draft_And_Request_Evidence (AwaitingApproval); confidence < 60 → Escalate_To_Human (NeedsHumanInput)
     - Return `{ path, status }` with status derived from path
@@ -56,7 +56,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9**
     - Use the decision-input generator with emphasis on the 60 and 85 boundaries
 
-  - [-] 3.3 Implement `computeOverallConfidence()` in `lib/decisionEngine.ts`
+  - [x] 3.3 Implement `computeOverallConfidence()` in `lib/decisionEngine.ts`
     - Aggregate extracted-field confidences into an overall score clamped to [0, 100]
     - _Requirements: 5.1_
 
@@ -100,7 +100,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Drive `classifyQwenFailure` and `callQwen` with generated failure sequences; assert transient runs make at most 3 attempts with exponential backoff and permanent failures return a structured `QwenFailure` on the first-failure attempt with no further retry
 
 - [ ] 7. Implement the Agent_Tools
-  - [-] 7.1 Implement Prisma-backed tools in `lib/agentTools.ts`
+  - [x] 7.1 Implement Prisma-backed tools in `lib/agentTools.ts`
     - `fetchPatientRecord(patientId)` → patient + associated chart notes; `fetchPayerPolicy(payerId, procedureCode)` → matching policy or null; `checkPriorAuthHistory(patientId)` → that patient's cases
     - _Requirements: 3.1, 3.2, 3.4_
 
@@ -116,7 +116,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 8: Prior-auth history isolation**
     - **Validates: Requirements 3.4**
 
-  - [ ] 7.5 Implement the NIH diagnosis-code lookup tool with graceful degradation
+  - [x] 7.5 Implement the NIH diagnosis-code lookup tool with graceful degradation
     - `lookupDiagnosisCode(code)` → `{ code, name, validated }`; treat network errors/non-200 as `{ validated: false }` rather than throwing
     - _Requirements: 3.3, 3.7_
 
@@ -356,7 +356,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - _Requirements: 1.2, 1.5_
 
 - [ ] 14. Implement case read, trace, and analytics APIs
-  - [ ] 14.1 Implement `GET /api/cases` and `GET /api/cases/[id]`
+  - [x] 14.1 Implement `GET /api/cases` and `GET /api/cases/[id]`
     - List all cases for the Dashboard; return full case detail (fields, trace steps, recommendation, appeal); 404 on unknown id
     - _Requirements: 10.1, 13.1_
 
@@ -591,7 +591,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 38.4**
 
 - [ ] 26. Implement the WhatsApp channel
-  - [-] 26.1 Implement request-signature verification in `lib/whatsapp/signature.ts`
+  - [x] 26.1 Implement request-signature verification in `lib/whatsapp/signature.ts`
     - Implement `computeSignatureHeader(rawBody, appSecret)` producing the `sha256=<hex>` HMAC over the exact raw bytes, and `verifySignatureWithSecret(rawBody, presentedHeader, appSecret)` doing a constant-time compare that returns `false` (never throws) on any body/secret/signature alteration or malformed/wrong-length header
     - _Requirements: 31.3, 31.4_
 
@@ -607,7 +607,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 67: WhatsApp verify handshake matches tokens exactly**
     - **Validates: Requirements 31.1, 31.2**
 
-  - [ ] 26.5 Implement two-layer inbound dedupe in `lib/whatsapp/dedupe.ts`
+  - [x] 26.5 Implement two-layer inbound dedupe in `lib/whatsapp/dedupe.ts`
     - Implement `createDedupe()` with a process-local ring buffer (fast path) plus a durable Prisma `ProcessedMessage` claim: `claim(messageId)` atomically wins at most once per id (subsequent claims fail), `markProcessed`/`release` manage claim state, and the durable layer fails open (returns true) on a store error so a fault never silently drops a message
     - _Requirements: 31.6_
 
@@ -615,7 +615,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 68: Inbound dedupe is idempotent (at most once)**
     - **Validates: Requirements 31.6**
 
-  - [ ] 26.7 Implement the total inbound parser in `lib/whatsapp/parseInbound.ts`
+  - [x] 26.7 Implement the total inbound parser in `lib/whatsapp/parseInbound.ts`
     - Implement `extractInboundMessages(payload)` to flatten a provider webhook envelope into individual messages and the total `parseInbound(raw, phoneNumberId)` mapping each raw message to exactly one `NormalizedInbound`, classifying unknown/unclassifiable messages as `kind: "unsupported"` with an empty `body` rather than dropping or throwing
     - _Requirements: 32.1, 32.2_
 
@@ -623,7 +623,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 69: Inbound parser is total**
     - **Validates: Requirements 32.1, 32.2**
 
-  - [ ] 26.9 Implement outbound sending with window fallback in `lib/whatsapp/sender.ts`
+  - [x] 26.9 Implement outbound sending with window fallback in `lib/whatsapp/sender.ts`
     - Implement `createSender(config)` exposing `sendText`, `sendTemplate`, `sendInteractiveButtons`, and `sendWithWindowFallback`, plus `isWindowClosed(err)`; apply an 8-second timeout per outbound call; on a closed-window failure, re-attempt exactly once using an approved template and then stop (never an automatic resend loop); a successful in-window attempt makes no fallback attempt
     - _Requirements: 33.4, 33.5, 33.6_
 
