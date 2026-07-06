@@ -38,3 +38,6 @@ Thumbs.db
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local build brief — not published
+authpilot-kiro-brief.md
