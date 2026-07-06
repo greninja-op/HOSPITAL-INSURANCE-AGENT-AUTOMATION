@@ -24,9 +24,13 @@ import { timingSafeEqual } from "node:crypto";
 import { getConfig, whatsappEnabled } from "@/lib/config";
 import { verifySignature } from "@/lib/whatsapp/signature";
 import { extractInboundMessages, parseInbound } from "@/lib/whatsapp/parseInbound";
-import { routeInbound } from "@/lib/whatsapp/router";
+import { resolveRole, routeInbound } from "@/lib/whatsapp/router";
 import { buildWhatsAppPorts } from "@/lib/whatsapp/wiring";
 import { createDedupe, type Dedupe } from "@/lib/whatsapp/dedupe";
+import {
+  recordInboundMessage,
+  recordOutboundMessage,
+} from "@/lib/whatsapp/channelAudit";
 
 export const runtime = "nodejs";
 
@@ -111,7 +115,26 @@ async function handleInbound(payload: unknown): Promise<void> {
     if (!claimed) continue;
 
     try {
-      await routeInbound(inbound, ports);
+      // Channel audit (Req 36.1): record the inbound message as it actually
+      // arrived, tagged with the resolved sender role (Req 34.7). Best-effort —
+      // never throws, so it cannot affect routing or the ack.
+      const role = resolveRole(inbound.phone, ports.staffNumbers);
+      await recordInboundMessage(inbound, { role });
+
+      const result = await routeInbound(inbound, ports);
+
+      // Channel audit (Req 36.1): record the outbound reply that traversed the
+      // channel — the generic PHI-free patient template or the staff command
+      // reply — linked to the Case the turn touched where known (Req 36.3).
+      if (result.reply) {
+        await recordOutboundMessage({
+          phone: inbound.phone,
+          role: result.role,
+          content: result.reply,
+          caseId: result.caseId ?? null,
+        });
+      }
+
       await dedupe.markProcessed(inbound.messageId);
     } catch (err) {
       // Release the claim so a later redelivery can retry, then swallow — a

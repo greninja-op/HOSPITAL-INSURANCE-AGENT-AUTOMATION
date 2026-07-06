@@ -1389,6 +1389,124 @@ function collectDecisionFindings(
   return findings;
 }
 
+// ─── Recommendation + plain-English explanation (Task 11.23, Req 15.1) ────────
+//
+// When the Decision_Intelligence stage produces its Resolution_Path decision the
+// Agent_Runner ALSO assembles, in the same stage, two Case-level artifacts and
+// persists them alongside the decision:
+//
+//   • Case.recommendation — the structured Recommendation JSON (headline; a
+//     reason citing the payer policy clause + chart evidence; risk band;
+//     Resolution_Path; the medium-path requestedEvidence; and, for the two
+//     drafting paths, the appealContent Appeal_Generation reads back verbatim).
+//   • Case.plainEnglishExplanation — a NON-EMPTY, jargon-free explanation of the
+//     denial reason and the next steps, produced for EVERY path (including
+//     Escalate_To_Human), for front-office staff to share with the patient.
+//
+// Both are derived from the Medical/Policy/Strategy/Decision stage SUMMARIES on
+// ctx.summaries plus the resolved Extracted_Field facts — never the raw source
+// documents (Req 5.2). Assembling the Recommendation.appealContent here (for the
+// drafting paths) keeps it consistent with Appeal_Generation (Task 11.15), which
+// reads Case.recommendation.appealContent verbatim when present.
+
+/** Map a Resolution_Path to the Recommendation risk band. */
+function riskForResolutionPath(path: ResolutionPath): Recommendation["risk"] {
+  switch (path) {
+    case "Auto_Draft":
+      return "Low";
+    case "Draft_And_Request_Evidence":
+      return "Medium";
+    case "Escalate_To_Human":
+    default:
+      return "High";
+  }
+}
+
+/** A human-readable headline for the recommendation, keyed by Resolution_Path. */
+function recommendationHeadline(path: ResolutionPath): string {
+  switch (path) {
+    case "Auto_Draft":
+      return "Appeal recommended — draft ready for approval.";
+    case "Draft_And_Request_Evidence":
+      return "Appeal recommended — additional supporting evidence requested.";
+    case "Escalate_To_Human":
+    default:
+      return "Manual review required before an appeal can proceed.";
+  }
+}
+
+/**
+ * Assemble the Recommendation.reason — always non-empty — citing the payer
+ * policy clause (from the Policy_Review summary) and the chart evidence (from
+ * the Medical_Review summary), plus the denial reason and chosen strategy. All
+ * inputs are digested stage summaries, never raw documents (Req 5.2).
+ */
+function buildRecommendationReason(params: {
+  denialReason: string;
+  policyReview: string;
+  medicalReview: string;
+  strategy: string;
+}): string {
+  const parts: string[] = [];
+  parts.push(
+    params.denialReason.trim() !== ""
+      ? `The payer denied the request citing "${params.denialReason.trim()}".`
+      : "The payer denial reason could not be determined from the submitted documents.",
+  );
+  if (params.policyReview !== "") {
+    parts.push(`Payer policy clause: ${params.policyReview}`);
+  }
+  if (params.medicalReview !== "") {
+    parts.push(`Chart evidence: ${params.medicalReview}`);
+  }
+  if (params.strategy !== "") {
+    parts.push(`Chosen strategy: ${params.strategy}`);
+  }
+  return parts.join(" ");
+}
+
+/**
+ * Build the NON-EMPTY, jargon-free plain-English explanation of the denial
+ * reason and the next steps for the Case (Req 15.1). Front-office staff share
+ * this with the patient. It always returns a non-empty string for EVERY
+ * Resolution_Path, including Escalate_To_Human.
+ */
+function buildPlainEnglishExplanation(params: {
+  path: ResolutionPath;
+  denialReason: string;
+  requestedEvidence: string[];
+}): string {
+  const denial =
+    params.denialReason.trim() !== ""
+      ? `The insurance company turned down the request because: ${params.denialReason.trim()}.`
+      : "The insurance company turned down the request, but the exact reason was not clear from the paperwork we received.";
+
+  let nextSteps: string;
+  switch (params.path) {
+    case "Auto_Draft":
+      nextSteps =
+        "We have prepared an appeal letter that uses the patient's medical records and the insurer's own policy to make the case. Our team will review it and, once approved, send it to the insurance company on the patient's behalf.";
+      break;
+    case "Draft_And_Request_Evidence": {
+      const items =
+        params.requestedEvidence.length > 0
+          ? ` To make the appeal as strong as possible, we also need a little more information: ${params.requestedEvidence.join("; ")}.`
+          : " To make the appeal as strong as possible, we may ask for a little more supporting information.";
+      nextSteps =
+        "We have prepared an appeal letter based on the patient's records and the insurer's policy." +
+        items +
+        " Once we have what we need, our team will review it and send it to the insurance company.";
+      break;
+    }
+    case "Escalate_To_Human":
+    default:
+      nextSteps =
+        "Because this case needs a closer look, a member of our team will review it personally to decide the best next step before anything is sent to the insurance company.";
+      break;
+  }
+  return `${denial} ${nextSteps}`;
+}
+
 /**
  * Decision_Intelligence stage body (Task 11.13) — pure reasoning over the
  * Medical/Policy/Strategy summaries (Req 5.2). Aggregates the overall
@@ -1396,6 +1514,9 @@ function collectDecisionFindings(
  * with `contradictionCount` = blocking-finding count (Req 29.4, 29.5), writes
  * the single `decision` Trace_Step (Req 5.6), and persists the Resolution_Path,
  * overall confidence, and the guarded Case_Status transition (Req 5.7–5.9, 28.1).
+ * It ALSO assembles + persists the Recommendation JSON and a NON-EMPTY
+ * plain-English explanation of the denial reason + next steps (Task 11.23,
+ * Req 15.1), derived from the same stage summaries.
  */
 async function decisionIntelligenceStage(
   ctx: StageContext,
@@ -1487,6 +1608,8 @@ async function decisionIntelligenceStage(
     overallConfidence: number;
     status?: CaseStatus;
     requestedEvidence?: string;
+    recommendation?: Prisma.InputJsonValue;
+    plainEnglishExplanation?: string;
   } = {
     resolutionPath: decision.path,
     overallConfidence,
@@ -1501,6 +1624,58 @@ async function decisionIntelligenceStage(
         ? requestedEvidenceItems.join("; ")
         : "Additional supporting documentation to strengthen the appeal.";
   }
+
+  // ── Req 15.1 (Task 11.23) — assemble + persist the Recommendation JSON and a
+  // NON-EMPTY plain-English explanation of the denial reason + next steps,
+  // derived from the Medical/Policy/Strategy/Decision SUMMARIES (Req 5.2) plus
+  // the resolved Extracted_Field facts — never the raw source documents.
+  const denialReason =
+    usableFieldValue(fields, INTAKE_FIELD_NAMES.denialReason) ?? "";
+  const patientName =
+    usableFieldValue(fields, INTAKE_FIELD_NAMES.patient) ?? "";
+  const policyReview = stripStageLabel(ctx.summaries.Policy_Review?.note);
+  const medicalReview = stripStageLabel(ctx.summaries.Medical_Review?.note);
+  const strategySummary = stripStageLabel(ctx.summaries.Strategy?.note);
+
+  const recommendation: Recommendation = {
+    headline: recommendationHeadline(decision.path),
+    reason: buildRecommendationReason({
+      denialReason,
+      policyReview,
+      medicalReview,
+      strategy: strategySummary,
+    }),
+    risk: riskForResolutionPath(decision.path),
+    resolutionPath: decision.path,
+  };
+  // Medium path — the specific additional evidence requested (Req 5.8).
+  if (
+    decision.path === "Draft_And_Request_Evidence" &&
+    requestedEvidenceItems.length > 0
+  ) {
+    recommendation.requestedEvidence = requestedEvidenceItems;
+  }
+  // Drafting paths — assemble the AppealContent Appeal_Generation (Task 11.15)
+  // reads back verbatim from Case.recommendation.appealContent (Req 7.2).
+  if (DRAFTING_PATHS.has(decision.path)) {
+    recommendation.appealContent = buildAppealContent({
+      recommendation: null,
+      patientName,
+      denialReason,
+      resolutionPath: decision.path,
+      requestedEvidence: data.requestedEvidence ?? null,
+      summaries: ctx.summaries,
+    });
+  }
+  data.recommendation = recommendation as unknown as Prisma.InputJsonValue;
+
+  // Req 15.1 — a non-empty plain-English explanation for EVERY path.
+  data.plainEnglishExplanation = buildPlainEnglishExplanation({
+    path: decision.path,
+    denialReason,
+    requestedEvidence: requestedEvidenceItems,
+  });
+
   await prisma.case.update({ where: { id: ctx.caseId }, data });
 
   const note =

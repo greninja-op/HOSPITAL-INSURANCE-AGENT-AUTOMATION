@@ -289,7 +289,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 49: Verification processing error yields a fail result**
     - **Validates: Requirements 22.7**
 
-  - [~] 11.23 Produce the plain-English explanation and store the recommendation
+  - [x] 11.23 Produce the plain-English explanation and store the recommendation
     - Generate a non-empty plain-English explanation of the denial reason and next steps; store the recommendation JSON and explanation on the Case
     - _Requirements: 15.1_
 
@@ -590,7 +590,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 74: Config summary never leaks a secret**
     - **Validates: Requirements 38.4**
 
-- [ ] 26. Implement the WhatsApp channel
+- [x] 26. Implement the WhatsApp channel
   - [x] 26.1 Implement request-signature verification in `lib/whatsapp/signature.ts`
     - Implement `computeSignatureHeader(rawBody, appSecret)` producing the `sha256=<hex>` HMAC over the exact raw bytes, and `verifySignatureWithSecret(rawBody, presentedHeader, appSecret)` doing a constant-time compare that returns `false` (never throws) on any body/secret/signature alteration or malformed/wrong-length header
     - _Requirements: 31.3, 31.4_
@@ -653,7 +653,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Implement the `POST` handler pipeline: capture the raw request bytes → HMAC-verify the `X-Hub-Signature-256` header over those exact bytes (when an app secret is configured) → acknowledge fast with 200 → dedupe by inbound message id → parse to `NormalizedInbound` → route via `routeInbound(buildRouterPorts())` → reply with a template; screen inbound text through the `Safety_Guard` before any Qwen prompt, create WhatsApp-originated Cases with `intakeType: "whatsapp_patient_note"`, and write channel-originated domain actions to the same `Trace_Step`/`Audit_Chain` entries the in-app flow uses
     - _Requirements: 31.3, 31.4, 31.5, 31.6, 31.7, 36.2, 36.3, 1.10, 1.11_
 
-  - [~] 26.16 Record channel messages in the WhatsApp channel audit
+  - [x] 26.16 Record channel messages in the WhatsApp channel audit
     - On every inbound and outbound WhatsApp message, persist a `WhatsAppMessage` row capturing direction, sender, role, content (template id / generic text for patient outbound), message type, provider message id, timestamp, and linked Case where applicable
     - _Requirements: 36.1_
 
@@ -726,7 +726,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert that for any staff free-text action intent without an exact structured command/explicit case id, `performCaseAction` is never invoked, no Case changes, no case id is guessed, and the reply requests the `Approve <case-id>` / `Reject <case-id>` format
     - **Validates: Requirements 45.1, 45.2, 45.3, 34.9, 44.7**
 
-  - [~] 26.34 Implement unsupported-type and ambiguous-reply handling in `lib/whatsapp/router.ts`
+  - [x] 26.34 Implement unsupported-type and ambiguous-reply handling in `lib/whatsapp/router.ts`
     - Unsupported inbound type (audio, video, location, sticker, contacts, or an otherwise unrecognized `kind: "unsupported"`) → reply asking the sender to resend as text, a photo, or a PDF, creating **no Case** and mutating no existing Case; ambiguous short patient reply with no clear referent and no open-Case context → reply with a clarifying question and create **no** new Case; both are terminal replies that never touch case state
     - _Requirements: 46.1, 46.2, 47.1, 47.2_
 

@@ -154,6 +154,15 @@ export const PATIENT_TEMPLATES = {
     "Your case is being worked on and there's activity on it. For the specifics, please check your patient portal or call our office.",
   noOpenCase:
     "We don't have an open case for this number right now. If you have a new insurance issue, just describe it here and we'll start one.",
+  // Req 46: generic, PHI-free resend guidance for an unsupported inbound type
+  // (audio, video, location, sticker, contacts, or an otherwise unrecognized
+  // message). Names no case specifics and creates/mutates no Case.
+  unsupportedType:
+    "Sorry — we can only read text, photos, or PDFs here. Please resend your insurance issue as a text message, a photo, or a PDF and we'll take a look.",
+  // Req 47: deterministic clarifying question for a short/ambiguous reply that
+  // has no clear referent and no open-case context. Opens no new Case.
+  clarify:
+    "Sorry, we didn't quite catch that. If you have an insurance issue you'd like help with, please describe it in a message and we'll get started.",
 } as const;
 
 export type PatientTemplateKey = keyof typeof PATIENT_TEMPLATES;
@@ -299,6 +308,35 @@ function isStatusQuestion(text: string): boolean {
   );
 }
 
+/**
+ * Does the patient text read as a short/ambiguous stray reply with no substance
+ * to open a Case on (Requirement 47.1)? Deterministic and intentionally narrow so
+ * a genuine (even terse) new-case description is NOT swallowed: only single-token
+ * greetings/acknowledgements, near-empty tokens, or content with no alphanumeric
+ * substance (emoji/punctuation only) count as ambiguous. Unicode-aware so non-Latin
+ * scripts (e.g. Hindi, Tamil, Arabic, Chinese) are treated as real content.
+ */
+function isAmbiguousShortReply(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (t.length === 0) return false; // truly empty is handled by the unsupported seam
+  // No alphanumeric substance at all (emoji / punctuation only) → ambiguous.
+  const substance = t.replace(/[^\p{L}\p{N}]/gu, "");
+  if (substance.length === 0) return true;
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length === 1) {
+    const only = words[0].toLowerCase();
+    const FILLERS = new Set([
+      "ok", "okay", "k", "kk", "hi", "hey", "hello", "yo", "yes", "no", "y", "n",
+      "thanks", "thank", "ty", "thx", "sure", "hmm", "hm", "yeah", "yep", "nope",
+      "test", "hii", "hiii",
+    ]);
+    if (FILLERS.has(only)) return true;
+    // A lone token with almost no content (e.g. "?", "a", "ok!").
+    if (substance.length <= 2) return true;
+  }
+  return false;
+}
+
 /** One-line staff status summary: status + confidence + SLA days left (Req 34.4). */
 function formatStaffStatus(summary: CaseSummary): string {
   const parts = [`Case ${summary.caseId}: ${summary.status}`];
@@ -437,7 +475,12 @@ async function routePatient(
 
   // Patient intake (free text and/or image) → create a Case and run the pipeline,
   // then acknowledge with the generic PHI-free template (Requirements 32.1–32.3).
-  if (inbound.body.trim().length > 0 || inbound.hasImage) {
+  // An image (with or without caption) is always a clear intake trigger. Free text
+  // opens a Case only when it reads as a substantive new-case trigger; a short or
+  // ambiguous stray reply must NOT open a Case (Requirement 47) and instead falls
+  // through to the clarifying-question seam below.
+  const hasText = inbound.body.trim().length > 0;
+  if (inbound.hasImage || (hasText && !isAmbiguousShortReply(inbound.body))) {
     const { caseId } = await ports.createCase({
       rawText: inbound.body,
       intakeType: "whatsapp_patient_note",
@@ -453,8 +496,42 @@ async function routePatient(
     };
   }
 
-  // Seam: nothing usable (empty / unsupported / ambiguous). Handled by the
-  // unsupported-type & ambiguous-reply logic (Req 46/47, task 26.34) and the
-  // conversational fallback (Req 44, task 26.35).
+  // (Requirement 47) Short / ambiguous patient reply with no clear referent and no
+  // open-Case context → reply with a clarifying question and create NO new Case.
+  // Prefer the scoped conversationalFallback port when wired (task 26.35); else a
+  // deterministic clarifying reply. With an open Case in context this turn is out
+  // of Requirement 47's scope, so it falls through to the seam below untouched.
+  if (hasText && isAmbiguousShortReply(inbound.body)) {
+    const open = await ports.lookupOpenCaseByPhone(inbound.phone);
+    if (!open) {
+      const body = ports.conversationalFallback
+        ? await ports.conversationalFallback({
+            role: "patient",
+            text: inbound.body,
+            caseContext: null,
+          })
+        : PATIENT_TEMPLATES.clarify;
+      await reply(ports, inbound.phone, body);
+      return { handled: true, role: "patient", reply: body };
+    }
+  }
+
+  // (Requirement 46) Unsupported inbound type — audio, video, location, sticker,
+  // contacts, or an otherwise unrecognized message that carries no usable text or
+  // image → reply asking the sender to resend as text, a photo, or a PDF, creating
+  // NO Case and mutating no existing Case. `request_welcome` is left for the
+  // greeting / language seam, not treated as unsupported here.
+  if (!hasText && !inbound.hasImage && inbound.kind !== "request_welcome") {
+    await reply(ports, inbound.phone, PATIENT_TEMPLATES.unsupportedType);
+    return {
+      handled: true,
+      role: "patient",
+      reply: PATIENT_TEMPLATES.unsupportedType,
+    };
+  }
+
+  // Seam: still nothing usable (e.g. a `request_welcome` open-conversation event,
+  // or an ambiguous reply that does carry open-Case context). Left for the greeting
+  // and conversational-fallback tasks. No Case is created or mutated here.
   return { handled: false, role: "patient" };
 }
