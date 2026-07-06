@@ -13,7 +13,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
   - _Requirements: 5.7, 5.8, 5.9, 23.3, 40.1_
 
 - [ ] 2. Define the data layer with Prisma
-  - [ ] 2.1 Author the Prisma schema and generate the client
+  - [-] 2.1 Author the Prisma schema and generate the client
     - Define `Patient`, `ChartNote`, `Payer`, `PayerPolicy`, `Case`, `ExtractedField`, `TraceStep` models per the design, including `Case.isUrgent`, `resolutionPath`, `denialReason`, `requestedEvidence`, `plainEnglishExplanation`, `recommendation`, `appealPdfUrl`, `resolvedAt`, and the multi-stage pipeline fields `Case.strategyOptions` (Json?) and `Case.verificationResult` (Json?)
     - Add the Case payer reference to the schema: `Case.payerId` (String?, optional relation to `Payer`) and the `Case.payerName` (String?) convenience field used as the denials-by-payer analytics grouping key, plus the corresponding `Payer.cases Case[]` reverse relation
     - Extend `TraceStep.stepType` to allow the seven values `tool_call`, `decision`, `human_action`, `medical_review`, `policy_review`, `strategy`, `verification`
@@ -576,8 +576,8 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 65: Gold-case evaluation passes iff path and triggering findings match**
     - **Validates: Requirements 30.2, 30.3, 30.4**
 
-- [ ] 25. Implement application configuration validation
-  - [ ] 25.1 Implement the fail-fast config loader in `lib/config.ts`
+- [x] 25. Implement application configuration validation
+  - [x] 25.1 Implement the fail-fast config loader in `lib/config.ts`
     - Implement `loadConfig(env)` with Zod: require `QWEN_API_KEY`, `QWEN_API_BASE` (URL), and `DATABASE_URL`; treat the four WhatsApp keys (`WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`) as an all-or-nothing group; on failure fail fast with a message naming every missing/invalid key, treating any strict non-empty subset of the WhatsApp group as a validation failure
     - Expose `whatsappEnabled(cfg)` returning true iff the `whatsapp` block is present (all four WhatsApp keys set); implement `redactedSummary(cfg)` mapping each configuration key to only `"set"` or `"missing"` and never emitting any secret value; invoke `loadConfig` once at boot so misconfiguration is caught immediately
     - _Requirements: 38.1, 38.2, 38.3, 38.4_
