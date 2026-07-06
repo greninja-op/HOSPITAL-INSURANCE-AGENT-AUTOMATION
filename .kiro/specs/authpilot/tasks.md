@@ -6,7 +6,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
 
 ## Tasks
 
-- [ ] 1. Scaffold project and shared foundations
+- [x] 1. Scaffold project and shared foundations
   - Initialize a Next.js 14 (App Router) + TypeScript project with Tailwind, shadcn/ui, Recharts, and Framer Motion
   - Add Vitest and fast-check; configure a test script and a shared fast-check config (`{ numRuns: 100 }`)
   - Create the `lib/` directory and define shared TypeScript types/enums: `CaseStatus`, `ResolutionPath`, `PipelineStage`, `intakeType`, `sourceType`, `stepType` (the seven allowed values), `Recommendation`, `AppealContent`, `StrategyOption`/`StrategyOptions`, `FlaggedIssue`/`VerificationResult`, plus the hardening types `Finding`/`FindingKind`/`FindingSeverity`, `QwenOutcome`/`QwenFailure`/`QwenFailureKind`, `AuditVerifyResult`, the status-transition types used by the case-status state machine, and the Shared_Case_Action types `CaseActionType`/`CaseActionMeta`/`CaseActionResult` (mirroring the `performCaseAction` interface in the design) so both the action route and the WhatsApp router can reference them without importing each other

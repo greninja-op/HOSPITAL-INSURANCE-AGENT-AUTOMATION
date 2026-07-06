@@ -62,6 +62,13 @@ This document defines the requirements for the full application: a Next.js 14 (A
 - **Emergency_Language**: Inbound patient text that matches AuthPilot's deterministic emergency-language patterns (for example chest pain, difficulty breathing, severe bleeding, stroke, overdose, or suicidal statements), detected without any language-model call.
 - **Handoff_Request**: A recorded request for a staff member to contact a patient directly, carrying the patient phone number, an optional linked Case, a reason, and an urgent flag.
 - **Conversational_Fallback**: The scoped conversational assistant that handles inbound WhatsApp messages that do not match a structured staff command, a clear new-case trigger, or a status query, operating under role-specific (patient or staff) content constraints.
+- **Language_Layer**: AuthPilot's optional multilingual capability for the WhatsApp_Channel, backed by Sarvam, that detects a patient's language, translates inbound patient text to English for the deterministic router and pipeline, localizes generic PHI-free outbound patient messages back into the patient's language, and optionally transcribes and synthesizes Voice_Notes. The Language_Layer is enabled only when SARVAM_API_KEY is configured and is disabled by default.
+- **Sarvam**: The external language-service provider (Sarvam AI) that the Language_Layer calls for text language identification, translation, speech-to-text, and text-to-speech, accessed through a single injectable HTTP port so no external call is required to run the WhatsApp_Channel in English-only mode.
+- **BCP-47_Language_Code**: A standard language tag (for example en-IN, hi-IN, ta-IN) used to represent a detected or selected patient language.
+- **Patient_Language**: The BCP-47_Language_Code chosen or detected for a patient, stored per patient phone number and reused on subsequent turns on the WhatsApp_Channel.
+- **Language_Picker**: The tappable WhatsApp interactive list through which a patient selects a Patient_Language, with each language labeled in its own script together with its English name, paged to respect the WhatsApp 10-row interactive-list cap.
+- **Register_Mirroring**: The selection of the outbound translation mode used when localizing a reply — "code-mixed" when the patient code-mixed or wrote casually, otherwise "formal" — so that a localized reply reads the way the patient writes.
+- **Voice_Note**: An inbound or outbound WhatsApp audio message; when the Language_Layer voice capability is enabled (TTS_ENABLED), inbound Voice_Notes may be transcribed and spoken replies synthesized as MP3 audio.
 
 ## Requirements
 
