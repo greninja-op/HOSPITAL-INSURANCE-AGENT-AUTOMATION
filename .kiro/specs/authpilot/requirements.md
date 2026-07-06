@@ -6,7 +6,7 @@ AuthPilot is a Qwen-powered autonomous agent that helps front-office/billing sta
 
 AuthPilot's agent runtime is organized as an ordered multi-stage pipeline rather than a single flat loop. The stages are: (1) Intake & Extraction, (2) Medical Review and (3) Policy Review running in parallel with restricted tool scopes, (4) Strategy, (5) Decision Intelligence, (6) Appeal Generation, (7) Verification/QA, (8) Human Approval, and (9) Submission & Tracking. Each stage records its own labeled trace steps so the live trace panel can show which stage produced each reasoning line. The Strategy stage estimates win-probability across candidate approaches from seeded case history and payer-specific track record; the Verification/QA stage independently checks the generated appeal for hallucinated citations and incorrect references before human review.
 
-This document defines the requirements for the full application: a Next.js 14 (App Router) + TypeScript web app with Tailwind, shadcn/ui, Recharts, and Framer Motion on the frontend; Next.js API routes with a custom TypeScript agent loop on the backend; SQLite via Prisma for persistence; Qwen via DashScope/OpenRouter for reasoning and tool use; and pdf-lib for document generation. All external systems (EHR, payer policy, claims) are mocked with locally seeded data.
+This document defines the requirements for the full application: a Next.js 14 (App Router) + TypeScript web app with Tailwind, shadcn/ui, Recharts, and Framer Motion on the frontend; Next.js API routes with a custom TypeScript agent loop on the backend; PostgreSQL via Prisma for persistence; Qwen via DashScope/OpenRouter for reasoning and tool use; and pdf-lib for document generation. All external systems (EHR, payer policy, claims) are mocked with locally seeded data.
 
 ## Glossary
 
@@ -571,12 +571,12 @@ The allowed Status_Transitions are defined by the following table. Any (from-sta
 
 ### Requirement 39: Data Store Portability
 
-**User Story:** As an operator, I want to run AuthPilot on SQLite by default and switch to PostgreSQL with a single configuration change, so that I can deploy on either data store without code changes.
+**User Story:** As an operator, I want AuthPilot to use PostgreSQL as its datasource while preserving portability at the Prisma level, so that I can point DATABASE_URL at any Prisma-supported engine that supports the Json type without changing application logic.
 
 #### Acceptance Criteria
 
-1. THE AuthPilot SHALL run on SQLite by default.
-2. WHERE the App_Configuration datasource provider and connection URL are set to PostgreSQL, THE AuthPilot SHALL run on PostgreSQL through that single configuration change without any change to application logic.
+1. THE AuthPilot SHALL run on PostgreSQL as its datasource, using native `Json` fields for structured columns.
+2. WHERE the App_Configuration connection URL (`DATABASE_URL`) is repointed at any Prisma-supported engine that supports the `Json` type, THE AuthPilot SHALL run on that engine without any change to application logic, because AuthPilot uses no provider-specific constructs and accesses all persistence through Prisma.
 
 ### Requirement 40: Shared Case Action Implementation
 

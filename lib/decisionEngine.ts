@@ -98,3 +98,54 @@ export function decide(input: DecisionInput): DecisionResult {
   // Rule 4 — low confidence (< 60) → Escalate_To_Human (Req 5.5).
   return { path: "Escalate_To_Human", status: statusForPath("Escalate_To_Human") };
 }
+
+// ─── Overall confidence aggregation (Requirement 5.1) ────────────────────────
+
+/** Inclusive bounds of a valid Confidence_Score (percent). */
+const CONFIDENCE_MIN = 0;
+const CONFIDENCE_MAX = 100;
+
+/**
+ * A single confidence input: either a bare score or any object carrying a
+ * numeric `confidence` field (matching the `ExtractedField.confidence` shape).
+ */
+export type ConfidenceLike = number | { confidence: number };
+
+/** Clamp a value into the inclusive [0, 100] Confidence_Score range. */
+function clampConfidence(value: number): number {
+  if (Number.isNaN(value)) return CONFIDENCE_MIN;
+  if (value < CONFIDENCE_MIN) return CONFIDENCE_MIN;
+  if (value > CONFIDENCE_MAX) return CONFIDENCE_MAX;
+  return value;
+}
+
+/**
+ * Aggregate extracted-field Confidence_Scores into a single overall score
+ * (Requirement 5.1).
+ *
+ * The overall score is the arithmetic mean of the individual per-field
+ * confidences, clamped to the inclusive range [0, 100]. Each input may be a
+ * bare number or an object carrying a numeric `confidence` field (the
+ * `ExtractedField` shape). Non-finite individual values are treated as 0 so a
+ * single bad reading cannot push the aggregate outside the valid range.
+ *
+ * This function is PURE: no I/O, no LLM. Empty input is handled
+ * deterministically by returning 0 (no fields ⇒ no confidence).
+ *
+ * @returns an overall Confidence_Score guaranteed to lie within [0, 100].
+ */
+export function computeOverallConfidence(fields: ReadonlyArray<ConfidenceLike>): number {
+  // Deterministic handling of empty input: no fields ⇒ 0 confidence (Req 5.1).
+  if (fields.length === 0) return CONFIDENCE_MIN;
+
+  let sum = 0;
+  for (const field of fields) {
+    const raw = typeof field === "number" ? field : field.confidence;
+    // Guard against non-finite readings before clamping the per-field value.
+    sum += clampConfidence(Number.isFinite(raw) ? raw : CONFIDENCE_MIN);
+  }
+
+  // Mean of clamped [0,100] values is itself within [0,100]; clamp again to be
+  // defensive against floating-point drift.
+  return clampConfidence(sum / fields.length);
+}
