@@ -297,7 +297,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 33: Plain-English explanation is always produced**
     - **Validates: Requirements 15.1**
 
-  - [~] 11.25 Wire failure-safe persistence of strategyOptions and verificationResult
+  - [x] 11.25 Wire failure-safe persistence of strategyOptions and verificationResult
     - Persist `strategyOptions` and `verificationResult` through the guarded persistence path; if either persistence fails, record a failure `Trace_Step` and retain the existing Case `recommendation` unchanged (never overwrite it)
     - _Requirements: 23.5_
 
@@ -335,7 +335,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 22.8, 22.9**
     - Assert an `unresolved_citation` blocking issue is added for exactly the citations/references that do not resolve to an in-scope stored record (and none for those that do), and that any unresolved reference forces the stored `verificationResult.status` to `fail`
 
-- [~] 12. Checkpoint - Ensure all tests pass
+- [x] 12. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 13. Implement intake and case creation API
@@ -465,7 +465,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert that for any `CaseActionType` and any injected persistence failure at any point, `performCaseAction` resolves to `{ success: false, message: <non-empty> }`, leaves `Case_Status` unchanged, and never propagates an exception
     - **Validates: Requirements 40.4**
 
-- [~] 16. Checkpoint - Ensure all tests pass
+- [x] 16. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 17. Implement shared layout and navigation
@@ -752,7 +752,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Assert the CI pipeline runs typecheck/lint/test/gold-eval/build and that boot fails fast on missing/invalid configuration; ops/config behaviors are covered by smoke/setup tests (no new numbered properties beyond 73/74)
     - _Requirements: 38.1, 38.2, 39.1, 39.2_
 
-- [~] 29. Final checkpoint - Ensure all tests pass
+- [x] 29. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
