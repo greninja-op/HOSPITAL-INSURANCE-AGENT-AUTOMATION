@@ -1,0 +1,45 @@
+# AuthPilot — local development stack.
+#
+# Primary use: the OPTIONAL Postgres switch. By default AuthPilot runs on SQLite with no
+# containers at all (just `npm run dev`). Bring up Postgres only when you want to exercise
+# the Postgres path:
+#
+#   docker compose up -d postgres
+#   # then set DATABASE_URL=postgresql://authpilot:authpilot@localhost:5433/authpilot
+#   # and change the Prisma datasource provider to "postgresql", then `npx prisma migrate dev`
+#
+# The `app` service is optional and only needed for self-hosted parity (Vercel needs no
+# container). Uncomment to run the whole thing in Docker.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: authpilot
+      POSTGRES_PASSWORD: authpilot
+      POSTGRES_DB: authpilot
+    ports:
+      - "5433:5432"
+    volumes:
+      - authpilot-pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/initdb:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # app:
+  #   build: .
+  #   env_file: ./.env
+  #   environment:
+  #     - DATABASE_URL=postgresql://authpilot:authpilot@postgres:5432/authpilot
+  #     - PORT=3000
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+
+volumes:
+  authpilot-pgdata:

@@ -1,0 +1,16 @@
+node_modules
+.next
+out
+dist
+.git
+.github
+*.md
+docs
+Memoire-main
+whatsapp-integration
+.env
+.env*.local
+*.db
+*.db-journal
+.vercel
+.DS_Store

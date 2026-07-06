@@ -1,0 +1,70 @@
+name: CI
+
+# Adapted for AuthPilot's stack (Node + Next.js + Prisma + Vitest/fast-check).
+# Single job replacing the reference project's 3 Bun jobs. Activates once the Next.js
+# app is scaffolded (package.json present — tasks.md task 1).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if app not scaffolded yet
+        id: guard
+        run: |
+          if [ -f package.json ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No package.json yet — AuthPilot app not scaffolded; skipping build/test."
+          fi
+
+      - name: Setup Node
+        if: steps.guard.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        if: steps.guard.outputs.ready == 'true'
+        run: npm ci
+
+      - name: Prisma generate
+        if: steps.guard.outputs.ready == 'true'
+        run: npx prisma generate
+
+      - name: Typecheck
+        if: steps.guard.outputs.ready == 'true'
+        run: npx tsc --noEmit
+
+      - name: Lint
+        if: steps.guard.outputs.ready == 'true'
+        run: npm run lint --if-present
+
+      - name: Test (unit + property-based)
+        if: steps.guard.outputs.ready == 'true'
+        run: npm test --if-present
+
+      - name: Gold-case evaluation
+        if: steps.guard.outputs.ready == 'true'
+        run: npm run eval --if-present
+
+      - name: Build
+        if: steps.guard.outputs.ready == 'true'
+        run: npm run build --if-present

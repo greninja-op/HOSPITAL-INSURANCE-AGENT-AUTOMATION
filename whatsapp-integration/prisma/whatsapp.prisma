@@ -1,0 +1,33 @@
+// WhatsApp integration — Prisma model additions.
+//
+// Merge these models into the app's `prisma/schema.prisma` once it exists. They align
+// with AuthPilot's existing idempotency + audit-chain requirements: ProcessedMessage is
+// the durable dedupe store, WhatsAppMessage is the channel audit log, and every
+// WhatsApp-originated action still writes normal TraceStep/audit-chain entries.
+
+/// Durable webhook dedupe / idempotency (Meta redelivers at-least-once).
+model ProcessedMessage {
+  messageId  String   @id // Meta message id (wa_message_id)
+  status     String   // "in_progress" | "processed"
+  reservedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+}
+
+/// Channel audit log for every inbound/outbound WhatsApp message.
+model WhatsAppMessage {
+  id          String   @id @default(cuid())
+  caseId      String?
+  case        Case?    @relation(fields: [caseId], references: [id])
+  direction   String   // "inbound" | "outbound"
+  sender      String   // E.164 phone number
+  role        String   // "patient" | "staff"
+  content     String
+  messageType String   // "trigger" | "status_update" | "approval_action" | "notification"
+  waMessageId String?  // Meta message id when known
+  timestamp   DateTime @default(now())
+}
+
+// Add to the existing `Case` model:
+//   whatsappMessages WhatsAppMessage[]
+//   // channel the case was created from; extend intakeType with "whatsapp_patient_note"
+//   patientPhone     String?   // E.164 of the patient for status lookups (opt-in only)
