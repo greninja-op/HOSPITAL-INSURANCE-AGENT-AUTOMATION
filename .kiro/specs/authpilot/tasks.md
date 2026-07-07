@@ -51,7 +51,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Treat the `contradictionCount` input as the number of blocking Findings supplied by the caller (see `lib/findings.ts`), so escalation-by-findings depends only on blocking findings
     - _Requirements: 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9, 29.4_
 
-  - [ ]* 3.2 Write property test for the Decision_Engine mapping
+  - [x]* 3.2 Write property test for the Decision_Engine mapping
     - **Property 14: Decision engine mapping**
     - **Validates: Requirements 4.4, 5.3, 5.4, 5.5, 5.7, 5.8, 5.9**
     - Use the decision-input generator with emphasis on the 60 and 85 boundaries
@@ -60,7 +60,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Aggregate extracted-field confidences into an overall score clamped to [0, 100]
     - _Requirements: 5.1_
 
-  - [ ]* 3.4 Write property test for overall confidence range
+  - [x]* 3.4 Write property test for overall confidence range
     - **Property 15: Overall confidence stays in range**
     - **Validates: Requirements 5.1**
 
@@ -69,12 +69,12 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - `slaDeadline`: +7 days standard, +72 hours urgent; `remainingMs`: deadline minus now (may be negative); `isAtRisk`: remaining < 24h including overdue
     - _Requirements: 12.1, 12.2, 12.3_
 
-  - [ ]* 4.2 Write property test for SLA deadline computation
+  - [x]* 4.2 Write property test for SLA deadline computation
     - **Property 30: SLA deadline computation**
     - Cover the `isUrgent`-driven deadline: `slaDeadline(createdAt, urgent)` returns `createdAt + 72h` when urgent and `createdAt + 7d` when standard, and a Case created without the urgent flag has `isUrgent` false with the 7-day deadline
     - **Validates: Requirements 1.8, 1.9, 12.1, 12.2**
 
-  - [ ]* 4.3 Write property test for the at-risk boundary
+  - [x]* 4.3 Write property test for the at-risk boundary
     - **Property 31: At-risk boundary**
     - **Validates: Requirements 12.3**
 
@@ -89,7 +89,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Never throw: resolve to a structured `QwenOutcome` — `{ ok: true, ... }` on success or a `QwenFailure { ok: false, kind, transient, attempts, detail }` on exhaustion or permanent failure — reported to the Agent_Runner
     - _Requirements: 6.5, 6.6, 6.7, 6.8_
 
-  - [ ]* 6.2 Write property test for the retry bound
+  - [x]* 6.2 Write property test for the retry bound
     - **Property 18: Qwen client retry bound**
     - **Validates: Requirements 6.5**
     - Use a deterministic fake that fails a configurable number of consecutive times
