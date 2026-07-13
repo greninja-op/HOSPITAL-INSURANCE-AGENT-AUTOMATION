@@ -67,6 +67,9 @@ export async function createTestDb(): Promise<TestDb> {
     {
       stdio: "ignore",
       env: { ...process.env, DATABASE_URL: databaseUrl },
+      // On Windows, Node's hardened spawn (CVE-2024-27980) rejects `.cmd`/`.bat`
+      // targets with EINVAL unless launched through a shell.
+      shell: process.platform === "win32",
     },
   );
 
