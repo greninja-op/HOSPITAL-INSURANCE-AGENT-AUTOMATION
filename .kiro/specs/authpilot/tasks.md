@@ -200,7 +200,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - On loop exhaustion without a decision, force Escalate_To_Human and record a Trace_Step with reasoning "needs manual review"; when `callQwen` reports a structured `QwenFailure`, degrade the calling stage gracefully by setting the Resolution_Path to Escalate_To_Human (NeedsHumanInput) rather than terminating the run abnormally; if any stage throws, record a failure Trace_Step naming the affected stage, set Escalate_To_Human, and do not run subsequent stages
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.9, 20.1, 20.5, 20.6_
 
-  - [ ]* 11.2 Write property test for the loop cap forcing escalation
+  - [-]* 11.2 Write property test for the loop cap forcing escalation
     - **Property 17: Loop cap forces escalation**
     - **Validates: Requirements 6.4**
 
@@ -208,7 +208,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Add the `STAGE_TOOLS` map and extend `dispatchTool(name, args, stage)` to permit a tool only when it is in the active stage's allow-list, recording a failure `Trace_Step` for any refused tool; restrict Medical_Review to `fetchPatientRecord` only and Policy_Review to `fetchPayerPolicy` only
     - _Requirements: 3.8, 3.9_
 
-  - [ ]* 11.4 Write property test for stage-scoped tool access
+  - [-]* 11.4 Write property test for stage-scoped tool access
     - **Property 42: Stage-scoped tool access**
     - **Validates: Requirements 3.8, 3.9**
 
@@ -219,7 +219,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Before the raw Intake text (or any extracted document text) is placed into the extraction prompt, screen it through the Safety_Guard (`screenUntrusted`, `lib/guard.ts`): supply the content to Qwen strictly as fenced, labeled data (never as instructions), and on injection detection record a Trace_Step flagging the attempt
     - _Requirements: 2.5, 2.6, 2.7, 2.8, 20.3, 20.4, 20.12, 27.1, 27.4, 27.5_
 
-  - [ ]* 11.6 Write property test for unresolved intake fields traced without terminating
+  - [-]* 11.6 Write property test for unresolved intake fields traced without terminating
     - **Property 38: Unresolved intake fields are traced without terminating**
     - **Validates: Requirements 20.4**
 
@@ -227,7 +227,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Run `Promise.all([runStage(..., "Medical_Review"), runStage(..., "Policy_Review")])` so each begins before the other completes; Medical_Review is scoped to `fetchPatientRecord` and writes `stepType: "medical_review"`, Policy_Review is scoped to `fetchPayerPolicy` and writes `stepType: "policy_review"`; each produces a summary consumed downstream
     - _Requirements: 20.2, 20.7, 20.8_
 
-  - [ ]* 11.8 Write property test for Medical and Policy review overlap
+  - [-]* 11.8 Write property test for Medical and Policy review overlap
     - **Property 37: Medical and Policy reviews overlap**
     - **Validates: Requirements 20.2**
 
@@ -235,7 +235,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Invoke `checkPriorAuthHistory(patientId)` and use payer-specific track record plus multi-payer policy diffing as an input; compute 1–5 candidate approaches each with an integer win-probability (0–100); when history is empty or the tool fails, fall back to payer track record only and set `usedPriorAuthHistory: false`; store `strategyOptions` ordered by descending win-probability; write `stepType: "strategy"`; provide the Strategy_Options summary to Decision_Intelligence
     - _Requirements: 17.3, 20.9, 21.1, 21.2, 21.3, 21.4, 21.5, 23.1_
 
-  - [ ]* 11.10 Write property test for win-probability count and range
+  - [-]* 11.10 Write property test for win-probability count and range
     - **Property 43: Win-probability count and range**
     - **Validates: Requirements 21.2**
 
