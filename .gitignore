@@ -41,3 +41,6 @@ next-env.d.ts
 
 # Local build brief — not published
 authpilot-kiro-brief.md
+
+# Test-generated appeal PDFs (runtime artifacts; keep the dir via .gitkeep)
+public/appeals/*.pdf
