@@ -14,7 +14,14 @@
 
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { callQwen, type QwenDeps, type QwenHttpResult } from "@/lib/qwen";
+import {
+  callQwen,
+  classifyQwenFailure,
+  type QwenDeps,
+  type QwenErrorShape,
+  type QwenHttpResult,
+} from "@/lib/qwen";
+import type { QwenFailureKind } from "@/lib/types";
 import { FC_CONFIG } from "@/lib/testConfig";
 
 const MAX_ATTEMPTS = 3;

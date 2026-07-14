@@ -110,9 +110,3 @@ Decision Intelligence outcome, so together they cover your three demo cases
 
 ---
 
-## Suggested live demo order
-
-1. **Scenario 1** end-to-end, live — this is your "wow, it just worked" moment. Send the patient message from your own phone while narrating the trace panel.
-2. **Scenario 3** — deliberately show the escalation. Say out loud: "and here's what happens when the agent isn't confident — it doesn't guess, it stops and tells a human exactly why."
-3. **Scenario 4**, quickly — shows the system isn't naively creating duplicate cases every time someone texts.
-4. Mention Scenario 2 verbally (missing-evidence path) if time is short — you don't need to run every branch live, just prove you have all three.

@@ -207,6 +207,3 @@ portal/dashboard login. You'll see it deflect gracefully rather than going silen
 
 ---
 
-## Suggested additions to your live demo
-
-If you have time for one more beat beyond the three core branches, **G1** (staff asking "why did it get flagged") is the single best one to show live — it demonstrates the bot isn't just a template dispenser, it can explain its own multi-stage reasoning conversationally, on demand, which directly answers the judge concern of "is this actually reasoning or just formatted output." **A1/A4** (bad photo → helpful reupload guidance) is the second-best pick if you want to show graceful error handling without spending much demo time on it.

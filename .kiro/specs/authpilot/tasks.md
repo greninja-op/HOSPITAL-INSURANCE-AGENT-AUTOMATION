@@ -31,7 +31,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Add a `createTraceStep` persistence guard in `lib/db.ts` that accepts a Trace_Step only when its step type is one of the seven allowed values; reject any other step type and record/return an error indication identifying the invalid step type
     - _Requirements: 23.3, 23.6_
 
-  - [ ]* 2.3 Write property test for trace step type restriction
+  - [x]* 2.3 Write property test for trace step type restriction
     - **Property 51: Trace step type restriction**
     - **Validates: Requirements 23.3, 23.6**
     - Use the stepType generator (values inside and outside the seven allowed values)
@@ -94,7 +94,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Validates: Requirements 6.5**
     - Use a deterministic fake that fails a configurable number of consecutive times
 
-  - [ ]* 6.3 Write property test for transient-vs-permanent retry classification
+  - [-]* 6.3 Write property test for transient-vs-permanent retry classification
     - **Property 57: Qwen transient-vs-permanent retry classification**
     - **Validates: Requirements 6.6, 6.7, 6.8**
     - Drive `classifyQwenFailure` and `callQwen` with generated failure sequences; assert transient runs make at most 3 attempts with exponential backoff and permanent failures return a structured `QwenFailure` on the first-failure attempt with no further retry
@@ -104,15 +104,15 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - `fetchPatientRecord(patientId)` → patient + associated chart notes; `fetchPayerPolicy(payerId, procedureCode)` → matching policy or null; `checkPriorAuthHistory(patientId)` → that patient's cases
     - _Requirements: 3.1, 3.2, 3.4_
 
-  - [ ]* 7.2 Write property test for patient record fetch round trip
+  - [x]* 7.2 Write property test for patient record fetch round trip
     - **Property 6: Patient record fetch round trip**
     - **Validates: Requirements 3.1**
 
-  - [ ]* 7.3 Write property test for payer policy fetch matching
+  - [x]* 7.3 Write property test for payer policy fetch matching
     - **Property 7: Payer policy fetch matches**
     - **Validates: Requirements 3.2**
 
-  - [ ]* 7.4 Write property test for prior-auth history isolation
+  - [x]* 7.4 Write property test for prior-auth history isolation
     - **Property 8: Prior-auth history isolation**
     - **Validates: Requirements 3.4**
 
@@ -120,7 +120,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - `lookupDiagnosisCode(code)` → `{ code, name, validated }`; treat network errors/non-200 as `{ validated: false }` rather than throwing
     - _Requirements: 3.3, 3.7_
 
-  - [ ]* 7.6 Write unit tests for the diagnosis-code lookup
+  - [x]* 7.6 Write unit tests for the diagnosis-code lookup
     - Happy-path integration example against the NIH shape (3.3) and the service-unavailable edge case returning `validated: false` (3.7)
     - _Requirements: 3.3, 3.7_
 
@@ -128,11 +128,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Map Qwen tool name → implementation; wrap every tool in try/catch; record a `tool_call` Trace_Step (tool name, input, output, reasoning, timestamp) on success and on failure; return an error observation instead of throwing
     - _Requirements: 3.5, 3.6_
 
-  - [ ]* 7.8 Write property test for resilient, always-traced dispatch
+  - [x]* 7.8 Write property test for resilient, always-traced dispatch
     - **Property 9: Tool dispatch is resilient and always traced**
     - **Validates: Requirements 3.5, 3.6**
 
-  - [ ]* 7.9 Write property test for trace step completeness
+  - [x]* 7.9 Write property test for trace step completeness
     - **Property 10: Trace step completeness**
     - **Validates: Requirements 9.2**
 
@@ -141,31 +141,31 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Use pdf-lib to render an appeal citing the denial reason, referenced Payer_Policy clause, and supporting Chart_Note evidence; persist the file and return `{ url }`
     - _Requirements: 7.3, 7.4_
 
-  - [ ]* 8.2 Write property test for appeal citation completeness
+  - [x]* 8.2 Write property test for appeal citation completeness
     - **Property 20: Appeal packet cites required evidence**
     - **Validates: Requirements 7.3**
 
-  - [ ]* 8.3 Write integration test for appeal PDF generation and storage
+  - [x]* 8.3 Write integration test for appeal PDF generation and storage
     - Generate a PDF for a sample case and assert a non-empty stored location reference
     - _Requirements: 7.4_
 
 - [x] 9. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 10. Implement entity extraction and detection helpers
+- [x] 10. Implement entity extraction and detection helpers
   - [x] 10.1 Implement extracted-field construction in the agent layer
     - Build Extracted_Field records for patient, payer, procedure code, diagnosis code, and denial reason with field name, value, confidence, source type, reasoning, timestamp, and originating step reference; mark undeterminable entities value "unknown" and confidence 0
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 9.1_
 
-  - [ ]* 10.2 Write property test for required entity extraction
+  - [x]* 10.2 Write property test for required entity extraction
     - **Property 3: Required entities are extracted**
     - **Validates: Requirements 2.1**
 
-  - [ ]* 10.3 Write property test for extracted-field completeness
+  - [x]* 10.3 Write property test for extracted-field completeness
     - **Property 4: Extracted field completeness**
     - **Validates: Requirements 2.2, 2.4, 9.1**
 
-  - [ ]* 10.4 Write property test for undetermined-entity marking
+  - [x]* 10.4 Write property test for undetermined-entity marking
     - **Property 5: Undetermined entities are marked unknown**
     - **Validates: Requirements 2.3**
 
@@ -173,15 +173,15 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Record a `Trace_Step` describing contradictions (with both conflicting sources), missing policy-required evidence gaps, and chart notes dated more than 90 days before case creation (including the note date)
     - _Requirements: 4.1, 4.2, 4.3_
 
-  - [ ]* 10.6 Write property test for contradiction recording
+  - [x]* 10.6 Write property test for contradiction recording
     - **Property 11: Contradictions are recorded with both sources**
     - **Validates: Requirements 4.1**
 
-  - [ ]* 10.7 Write property test for missing-evidence flagging
+  - [x]* 10.7 Write property test for missing-evidence flagging
     - **Property 12: Missing policy-required evidence is flagged**
     - **Validates: Requirements 4.2**
 
-  - [ ]* 10.8 Write property test for stale-note boundary flagging
+  - [x]* 10.8 Write property test for stale-note boundary flagging
     - **Property 13: Stale chart notes are flagged at the 90-day boundary**
     - **Validates: Requirements 4.3**
 
@@ -190,7 +190,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Implement `blockingCount(findings)` (the value fed to the Decision_Engine as `contradictionCount`) and `shouldEscalate(findings)` (true iff at least one blocking finding exists); surface `warning` findings without forcing escalation
     - _Requirements: 29.1, 29.2, 29.3_
 
-  - [ ]* 10.10 Write property test for findings-driven escalation
+  - [x]* 10.10 Write property test for findings-driven escalation
     - **Property 64: Escalation is driven only by blocking findings**
     - **Validates: Requirements 29.2, 29.4, 29.5**
 
@@ -529,7 +529,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Implement `screenUntrusted` as a deterministic, non-LLM screen that returns the content fenced and labeled as data (never as instructions) and sets `injectionDetected` true iff the text matches at least one prompt-injection / instruction-override pattern; consumed by the Intake_And_Extraction stage (task 11.5) before any Qwen call
     - _Requirements: 27.2, 27.3_
 
-  - [ ]* 23.2 Write property test for the safety guard
+  - [-]* 23.2 Write property test for the safety guard
     - **Property 62: Safety guard fences untrusted content and detects injection deterministically**
     - **Validates: Requirements 27.2, 27.3, 27.4, 27.5**
 
@@ -538,7 +538,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Route every status write — runner stage-advances (task 11.13), the action route and Case_Outcome recording (task 15.1) — through `assertTransition`
     - _Requirements: 28.1, 28.2, 28.3, 28.4, 28.5_
 
-  - [ ]* 23.4 Write property test for the status transition table
+  - [-]* 23.4 Write property test for the status transition table
     - **Property 63: Status transitions obey the allowed-transition table**
     - **Validates: Requirements 28.1, 28.2, 28.3, 28.4, 28.5**
 
@@ -547,11 +547,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Wire hash-chained writes into the trace-step persistence path (`createTraceStep` in `lib/db.ts`): the first event's `prevHash` is `GENESIS_HASH`, each subsequent event's `prevHash` is the previous event's stored `hash`, and each event captures its `beforeState`/`afterState` for mutating changes
     - _Requirements: 25.1, 25.2, 25.3, 25.4, 25.7_
 
-  - [ ]* 23.6 Write property test for an untampered chain verifying as intact
+  - [-]* 23.6 Write property test for an untampered chain verifying as intact
     - **Property 59: Untampered audit chain verifies as intact**
     - **Validates: Requirements 25.1, 25.2, 25.7**
 
-  - [ ]* 23.7 Write property test for tamper detection and localization
+  - [-]* 23.7 Write property test for tamper detection and localization
     - **Property 60: Tampering breaks the chain and the first broken event is identified**
     - **Validates: Requirements 25.5, 25.6**
 
@@ -563,7 +563,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Implement `withIdempotency(key, operation, run)` that applies the effect and stores the result the first time a key is seen and returns the stored original result on any retry with the same key, applying the effect at most once; wired into the action route (task 15.1) for submission/approval/outcome/stage-advance
     - _Requirements: 26.1, 26.2, 26.3, 26.4, 26.5_
 
-  - [ ]* 23.10 Write property test for idempotent mutating operations
+  - [x]* 23.10 Write property test for idempotent mutating operations
     - **Property 61: Mutating operations are idempotent under a repeated key**
     - **Validates: Requirements 26.2, 26.3, 26.4, 26.5**
 
@@ -572,7 +572,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Author the `eval/gold/*.json` fixtures (each with a fixed Intake and the expected Resolution_Path and expected triggering Finding identifier(s)) and `scripts/eval.ts` exposing `runGoldCases` that executes each Gold_Case against deterministic fakes and reports a per-case pass/fail; a Gold_Case passes only when both the produced Resolution_Path and the produced triggering Finding identifier(s) match the expected values; note it can gate CI
     - _Requirements: 30.1, 30.2, 30.3, 30.4_
 
-  - [ ]* 24.2 Write property test for gold-case evaluation
+  - [x]* 24.2 Write property test for gold-case evaluation
     - **Property 65: Gold-case evaluation passes iff path and triggering findings match**
     - **Validates: Requirements 30.2, 30.3, 30.4**
 
@@ -582,11 +582,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Expose `whatsappEnabled(cfg)` returning true iff the `whatsapp` block is present (all four WhatsApp keys set); implement `redactedSummary(cfg)` mapping each configuration key to only `"set"` or `"missing"` and never emitting any secret value; invoke `loadConfig` once at boot so misconfiguration is caught immediately
     - _Requirements: 38.1, 38.2, 38.3, 38.4_
 
-  - [ ]* 25.2 Write property test for fail-fast, all-or-nothing config validation
+  - [x]* 25.2 Write property test for fail-fast, all-or-nothing config validation
     - **Property 73: Config validation is fail-fast and all-or-nothing**
     - **Validates: Requirements 38.1, 38.2, 38.3**
 
-  - [ ]* 25.3 Write property test for the secret-free config summary
+  - [x]* 25.3 Write property test for the secret-free config summary
     - **Property 74: Config summary never leaks a secret**
     - **Validates: Requirements 38.4**
 
