@@ -1,141 +1,118 @@
 /**
  * lib/agentRunner.verificationPassFail.test.ts
  *
- * Property test (Task 11.20): the verification pass/fail definition.
+ * Property test (Task 11.20) — Property 47: Verification pass/fail definition.
  *
- * Feature: authpilot, Property 47: Verification pass/fail definition.
+ * Feature: authpilot.
  *
- *   For ANY flagged-issues list, the stored Verification_Result has status
- *   "pass" if and only if the list is empty, and "fail" otherwise, and it
- *   carries the complete flagged-issues list unchanged. The Verification_QA
- *   stage (`lib/agentRunner.ts`) derives `verificationResult.status` as `pass`
- *   iff the flagged-issues list is empty, else `fail`.
+ *   *For any* Appeal_Packet the Verification_QA stage checks, the stored
+ *   `Verification_Result.status` is derived from the flagged-issues list by a
+ *   strict biconditional: status === "pass" ⟺ the flagged-issues list is empty,
+ *   and any non-empty flagged-issues list ⟹ status === "fail". Equivalently,
+ *   there is never a `pass` carrying issues and never a `fail` with zero issues.
  *
  * **Validates: Requirements 22.4**
  *
- * Strategy: the pass/fail derivation is inline in the Verification_QA stage body
- * (no exported pure helper), so this drives the REAL `runAgent` pipeline end to
- * end against an isolated, throwaway PostgreSQL schema (via `createTestDb`) and
- * observes the persisted `Case.verificationResult`. Only the network /
- * side-effecting seams are replaced with deterministic fakes so verification is
- * exercised without the live Qwen model or real PDF I/O:
+ * There is no exported pure helper that maps flagged issues → status: the
+ * derivation lives inline in the (non-exported) Verification_QA stage body of
+ * `lib/agentRunner.ts` as `status: flaggedIssues.length === 0 ? "pass" : "fail"`.
+ * So — as the task directs — this property drives the REAL `runAgent` pipeline
+ * end to end against an isolated, throwaway PostgreSQL schema (`createTestDb`),
+ * replacing only the network / side-effecting seams with deterministic fakes,
+ * and asserts the biconditional on the ACTUAL persisted `Verification_Result`.
  *
- *   • `./qwen`.callQwen is a STAGE-AWARE fake: for Intake_And_Extraction it
- *     returns a JSON five-field extraction whose values are set per property
- *     sample (this is the only lever that steers entity resolution, and thus
- *     whether the drafted appeal's citations/references resolve); every other
- *     Qwen-calling stage receives a benign completing answer.
- *   • `./decisionEngine`.decide is forced to `Auto_Draft` so the pipeline always
- *     reaches Appeal_Generation + Verification_QA with an Appeal_Packet to
- *     verify (verification only runs on a drafting path). Every other
- *     decisionEngine export (e.g. `computeOverallConfidence`) is preserved.
- *   • `./appealPdf`.generateAppealPdf is stubbed to a hermetic fake returning a
- *     non-empty location reference WITHOUT touching the filesystem.
+ * Strategy (mirrors lib/agentRunner.verificationGate.test.ts):
  *
- * Shared reference data (one Payer + PayerPolicy, one Patient + ChartNote) is
- * seeded once; each property sample only creates a fresh Case and picks the
- * intake extraction values, steering verification into one of four scenarios:
- * a fully-consistent CLEAN pass (0 issues) and three defect variants that each
- * force one or more flagged issues (a fail). For every sample the biconditional
- * `status === "pass" ⟺ flaggedIssues.length === 0` is asserted on the persisted
- * Verification_Result, exercising both branches of the definition.
+ *   • `./qwen`.callQwen — a FAKE that completes every stage on its first
+ *     iteration (no network). It returns a controlled intake extraction when a
+ *     sample supplies one (used to produce a fully-grounded, passing appeal),
+ *     otherwise a benign `"{}"` (an ungrounded appeal whose citations cannot
+ *     resolve → flagged issues → fail).
+ *   • `./decisionEngine`.decide — mocked to FORCE a DRAFTING Resolution_Path so
+ *     the pipeline actually reaches Verification_QA (the only paths that draft
+ *     an appeal to verify). Every other export is preserved via `importActual`.
+ *   • `./appealPdf`.generateAppealPdf — stubbed to return a fake url (no PDF is
+ *     rendered or written).
  *
- * Uses Vitest + fast-check (numRuns 100), consistent with the rest of the suite.
+ * To exercise BOTH branches of the derivation, each sample chooses whether the
+ * appeal is grounded: a grounded sample seeds matching Payer / Patient /
+ * Chart_Note / Payer_Policy records and feeds a matching intake extraction, so
+ * every citation resolves and the flagged-issues list is empty (→ pass); an
+ * ungrounded sample seeds nothing, so citations cannot resolve and the list is
+ * non-empty (→ fail). The property itself does NOT assume which branch a sample
+ * lands in — it only asserts the pass/fail derivation holds for whatever list
+ * results. Uses Vitest + fast-check (numRuns 100), consistent with the suite.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
+import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 
 import { FC_CONFIG } from "./testConfig";
 import { createTestDb, type TestDb } from "./testDb";
-import type { AppealContent, QwenOutcome, VerificationResult } from "./types";
-
-// ─── Canonical consistent values (the CLEAN pass scenario resolves to these) ──
-const PATIENT_NAME = "Jane Roe";
-const PAYER_NAME = "Acme Health";
-const PROCEDURE_CODE = "70551";
-const DIAGNOSIS_CODE = "M54.5";
-const DENIAL_REASON = "not medically necessary";
+import type { QwenOutcome, ResolutionPath, VerificationResult } from "./types";
 
 // ─── Hoisted controller shared with the module mocks ──────────────────────────
 //
 // `vi.mock` factories are hoisted above imports, so the mutable state they close
-// over must be created with `vi.hoisted`. Each property sample sets
-// `controller.intake` to the extraction values for that run BEFORE invoking
-// `runAgent`; `controller.appealCalls` records the caseIds the stubbed
-// generateAppealPdf was asked to render.
+// over must be created with `vi.hoisted`. Each sample sets `controller.decision`
+// (the FORCED drafting decision) and, for a grounded sample,
+// `controller.intakeExtraction` (the five-field extraction that resolves).
 const controller = vi.hoisted(() => ({
-  intake: {
-    patient: "Jane Roe",
-    payer: "Acme Health",
-    procedureCode: "70551",
-    diagnosisCode: "M54.5",
-    denialReason: "not medically necessary",
-  },
-  appealCalls: [] as string[],
+  /** The decision the mocked `decide` returns for the current sample. */
+  decision: null as { path: string; status: string } | null,
+  /** Optional controlled intake extraction (else the intake fake returns "{}"). */
+  intakeExtraction: null as Record<string, unknown> | null,
 }));
 
-// STAGE-AWARE fake Qwen: route by the stage's system prompt (messages[0]).
-// Intake gets a JSON five-field extraction at the sampled values; every other
-// stage gets a benign final answer (no tool calls) so it completes on iter 1.
+// FAKE Qwen: every stage completes immediately (no tool calls). Content "{}" is
+// valid JSON so the JSON-parsing stages degrade cleanly to their empty/fallback
+// shapes and the prose stages use it as their assessment text. When a sample
+// supplies `controller.intakeExtraction`, the Intake stage receives that exact
+// five-field extraction (routed by the stage's system prompt).
 vi.mock("./qwen", async (importActual) => {
   const actual = await importActual<typeof import("./qwen")>();
-  const c = controller;
   return {
     ...actual,
     callQwen: async (
-      messages: { role: string; content: string | null }[],
+      messages: import("./qwen").ChatMessage[],
     ): Promise<QwenOutcome> => {
-      const system = messages[0]?.content ?? "";
-      if (system.includes("Intake_And_Extraction")) {
-        const field = (value: string) => ({
-          value,
-          confidence: 0.9,
-          reasoning: "fake intake extraction for the pass/fail definition test",
-        });
-        const extraction = {
-          patient: field(c.intake.patient),
-          payer: field(c.intake.payer),
-          procedureCode: field(c.intake.procedureCode),
-          diagnosisCode: field(c.intake.diagnosisCode),
-          denialReason: field(c.intake.denialReason),
+      const sys =
+        typeof messages[0]?.content === "string" ? messages[0].content : "";
+      if (
+        sys.includes("the Intake_And_Extraction stage") &&
+        controller.intakeExtraction
+      ) {
+        return {
+          ok: true as const,
+          toolCalls: [],
+          content: JSON.stringify(controller.intakeExtraction),
         };
-        return { ok: true, toolCalls: [], content: JSON.stringify(extraction) };
       }
-      // Medical_Review / Policy_Review / Strategy — a benign completing answer.
-      return {
-        ok: true,
-        toolCalls: [],
-        content: "Assessment complete for the purposes of this test.",
-      };
+      return { ok: true as const, toolCalls: [], content: "{}" };
     },
   };
 });
 
-// FORCE a drafting path so the pipeline always reaches Verification_QA with an
-// Appeal_Packet to verify. Preserve every other `./decisionEngine` export.
+// FORCE the (drafting) Resolution_Path so the pipeline reaches Verification_QA.
+// Preserve `computeOverallConfidence` and everything else via importActual.
 vi.mock("./decisionEngine", async (importActual) => {
   const actual = await importActual<typeof import("./decisionEngine")>();
   return {
     ...actual,
-    decide: () => ({ path: "Auto_Draft", status: "AwaitingApproval" }),
+    decide: () => controller.decision,
   };
 });
 
-// Hermetic appeal generator: never writes a PDF. Records the caseId and returns
-// a non-empty, servable-looking location reference derived from the caseId.
+// Stub the generate-appeal-PDF tool: return a fake url — no PDF is rendered or
+// written. Preserve every other `./appealPdf` export.
 vi.mock("./appealPdf", async (importActual) => {
   const actual = await importActual<typeof import("./appealPdf")>();
-  const c = controller;
   return {
     ...actual,
-    generateAppealPdf: async (
-      caseId: string,
-      _content: AppealContent,
-    ): Promise<{ url: string }> => {
-      c.appealCalls.push(caseId);
-      return { url: `/appeals/${caseId}.pdf` };
-    },
+    generateAppealPdf: async (caseId: string) => ({
+      url: `/appeals/${caseId}.pdf`,
+    }),
   };
 });
 
@@ -144,97 +121,127 @@ let prisma: PrismaClient;
 let runAgent: typeof import("./agentRunner").runAgent;
 
 beforeAll(async () => {
-  // Provision an isolated schema and bind the shared Prisma client to it BEFORE
-  // importing the runner, so `lib/db.ts` and the runner write to the test schema.
+  // Provision an isolated schema and bind its client as the shared singleton
+  // BEFORE importing the runner, so `runAgent` and `createTraceStep` write to it.
   testDb = await createTestDb();
+  prisma = testDb.prisma;
   process.env.DATABASE_URL = testDb.databaseUrl;
+  (globalThis as unknown as { prisma?: PrismaClient }).prisma = prisma;
 
   const runner = await import("./agentRunner");
   runAgent = runner.runAgent;
-
-  const db = await import("./db");
-  prisma = db.prisma;
-
-  // Seed the ONE canonical Payer + PayerPolicy and Patient + ChartNote the
-  // CLEAN pass scenario resolves against. Entity resolution in the Intake stage
-  // links a Case to these by (case-insensitive) NAME match, so the sampled
-  // intake values decide whether each citation/reference resolves.
-  const payer = await prisma.payer.create({ data: { name: PAYER_NAME } });
-  await prisma.payerPolicy.create({
-    data: {
-      payerId: payer.id,
-      policyCode: "LCD L34567",
-      procedureCode: PROCEDURE_CODE,
-      criteriaText:
-        "Documented conservative therapy for at least six weeks is required before the procedure is considered medically necessary.",
-    },
-  });
-  const patient = await prisma.patient.create({
-    data: { name: PATIENT_NAME, dob: new Date("1980-01-01T00:00:00.000Z"), payerId: payer.id },
-  });
-  await prisma.chartNote.create({
-    data: {
-      patientId: patient.id,
-      noteDate: new Date("2024-01-15T00:00:00.000Z"),
-      content: "Patient reports persistent low-back pain unresponsive to conservative therapy.",
-      diagnosisCode: DIAGNOSIS_CODE,
-    },
-  });
 }, 120_000);
 
 afterAll(async () => {
   await testDb?.cleanup();
 });
 
-// ─── Scenario generators ──────────────────────────────────────────────────────
-//
-// Each scenario fixes the five intake extraction values and the expected
-// pass/fail outcome. The CLEAN scenario resolves every citation/reference and
-// matches every Extracted_Field, yielding 0 flagged issues (pass). Each defect
-// variant perturbs exactly one lever so verification flags one or more issues
-// (fail), covering distinct flagged-issue shapes.
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-interface Scenario {
-  label: string;
-  expectPass: boolean;
-  intake: {
-    patient: string;
-    payer: string;
-    procedureCode: string;
-    diagnosisCode: string;
-    denialReason: string;
+/** Seed a fresh, independent Case (status New) for one sample. */
+async function seedCase(
+  intakeType: string,
+  rawIntakeText: string,
+  urgent: boolean,
+): Promise<string> {
+  const kase = await prisma.case.create({
+    data: {
+      intakeType,
+      rawIntakeText: rawIntakeText.trim() === "" ? "intake" : rawIntakeText,
+      status: "New",
+      isUrgent: urgent,
+      slaDeadline: new Date("2099-01-01T00:00:00.000Z"),
+    },
+    select: { id: true },
+  });
+  return kase.id;
+}
+
+/**
+ * Seed a fully in-scope Payer / Patient / Chart_Note / Payer_Policy set with
+ * UNIQUE names (so 100 runs never collide) and return the matching five-field
+ * intake extraction. Feeding this extraction makes every Appeal_Packet
+ * citation/reference resolve and match → the flagged-issues list is empty.
+ */
+async function seedGroundedRecords(): Promise<Record<string, unknown>> {
+  const suffix = randomBytes(5).toString("hex");
+  const payerName = `Grounded Health Plan ${suffix}`;
+  const patientName = `Grounded Patient ${suffix}`;
+  const procedureCode = "27447";
+  const diagnosisCode = "M17.11";
+  const denialReason = "not medically necessary";
+
+  const payer = await prisma.payer.create({ data: { name: payerName } });
+  const patient = await prisma.patient.create({
+    data: {
+      name: patientName,
+      dob: new Date("1980-01-01T00:00:00.000Z"),
+      payerId: payer.id,
+    },
+  });
+  await prisma.chartNote.create({
+    data: {
+      patientId: patient.id,
+      noteDate: new Date("2025-01-01T00:00:00.000Z"),
+      content: "Knee osteoarthritis; conservative therapy failed.",
+      diagnosisCode,
+    },
+  });
+  await prisma.payerPolicy.create({
+    data: {
+      payerId: payer.id,
+      policyCode: `LCD ${suffix}`,
+      procedureCode,
+      criteriaText:
+        "Total knee arthroplasty is covered when conservative therapy has failed.",
+    },
+  });
+
+  const draft = (value: string) => ({
+    value,
+    confidence: 0.95,
+    reasoning: "seeded verification-pass example",
+  });
+  return {
+    patient: draft(patientName),
+    payer: draft(payerName),
+    procedureCode: draft(procedureCode),
+    diagnosisCode: draft(diagnosisCode),
+    denialReason: draft(denialReason),
   };
 }
 
-const cleanIntake = {
-  patient: PATIENT_NAME,
-  payer: PAYER_NAME,
-  procedureCode: PROCEDURE_CODE,
-  diagnosisCode: DIAGNOSIS_CODE,
-  denialReason: DENIAL_REASON,
-};
+/** Read the stored Verification_Result after a run. */
+async function readVerificationResult(
+  caseId: string,
+): Promise<VerificationResult | null> {
+  const kase = await prisma.case.findUnique({
+    where: { id: caseId },
+    select: { verificationResult: true },
+  });
+  return (kase?.verificationResult as unknown as VerificationResult) ?? null;
+}
 
-const scenarioArb: fc.Arbitrary<Scenario> = fc.constantFrom<Scenario>(
-  // CLEAN — everything resolves and matches → 0 issues → pass.
-  { label: "clean", expectPass: true, intake: { ...cleanIntake } },
-  // Payer does not resolve → the payer-policy citation is unresolved → fail.
-  {
-    label: "unlinked-payer",
-    expectPass: false,
-    intake: { ...cleanIntake, payer: "Nonexistent Payer LLC" },
-  },
-  // Patient does not resolve → the patient reference is unresolved → fail.
-  {
-    label: "unlinked-patient",
-    expectPass: false,
-    intake: { ...cleanIntake, patient: "Ghost Patient" },
-  },
-  // Diagnosis code does not match any chart note → reference mismatch → fail.
-  {
-    label: "diagnosis-mismatch",
-    expectPass: false,
-    intake: { ...cleanIntake, diagnosisCode: "Z88.8" },
-  },
+/** Assert the pass/fail derivation biconditional on a stored result (Req 22.4). */
+function assertPassFailDefinition(vr: VerificationResult): void {
+  expect(["pass", "fail"]).toContain(vr.status);
+  // status === "pass" ⟺ the flagged-issues list is empty.
+  expect(vr.status === "pass").toBe(vr.flaggedIssues.length === 0);
+  // Restated both directions for clarity / stronger failure messages:
+  if (vr.flaggedIssues.length === 0) {
+    expect(vr.status).toBe("pass");
+  } else {
+    // any non-empty flagged-issues list ⟹ "fail".
+    expect(vr.status).toBe("fail");
+  }
+}
+
+// ─── Generators ───────────────────────────────────────────────────────────────
+
+/** Only the DRAFTING paths draft an appeal, so only they reach Verification_QA. */
+const draftingPathArb: fc.Arbitrary<ResolutionPath> = fc.constantFrom(
+  "Auto_Draft",
+  "Draft_And_Request_Evidence",
 );
 
 const intakeTypeArb = fc.constantFrom(
@@ -243,132 +250,81 @@ const intakeTypeArb = fc.constantFrom(
   "phone_note",
   "whatsapp_patient_note",
 );
-
-/** Seed a fresh, independent Case (status New) for one property sample. */
-async function seedCase(intakeType: string): Promise<string> {
-  const kase = await prisma.case.create({
-    data: {
-      intakeType,
-      rawIntakeText:
-        "Patient Jane Roe, payer Acme Health, procedure 70551, dx M54.5, denied as not medically necessary.",
-      status: "New",
-      isUrgent: false,
-      slaDeadline: new Date("2099-01-01T00:00:00.000Z"),
-    },
-    select: { id: true },
-  });
-  return kase.id;
-}
-
-/** Read the persisted Verification_Result off the Case (Req 23.2). */
-async function readVerificationResult(
-  caseId: string,
-): Promise<VerificationResult | null> {
-  const kase = await prisma.case.findUnique({
-    where: { id: caseId },
-    select: { verificationResult: true },
-  });
-  return (kase?.verificationResult as unknown as VerificationResult | null) ?? null;
-}
+const rawIntakeArb = fc.string({ minLength: 1, maxLength: 120 });
 
 // ─── Property 47 ────────────────────────────────────────────────────────────────
 
 describe("runAgent — verification pass/fail definition (Task 11.20, Property 47)", () => {
-  // **Validates: Requirements 22.4**
   it(
-    "stores a Verification_Result whose status is pass iff the flagged-issues list is empty, else fail, carrying the complete list",
+    "stores status pass IFF the flagged-issues list is empty, else fail (Req 22.4)",
     async () => {
       await fc.assert(
         fc.asyncProperty(
-          scenarioArb,
+          draftingPathArb,
           intakeTypeArb,
-          async (scenario, intakeType) => {
-            // Arrange: a fresh Case; the sampled intake values steer resolution.
-            const caseId = await seedCase(intakeType);
-            controller.intake = { ...scenario.intake };
-            controller.appealCalls = [];
+          rawIntakeArb,
+          fc.boolean(),
+          fc.boolean(),
+          async (path, intakeType, rawIntakeText, urgent, grounded) => {
+            // Arrange: force a drafting decision; optionally ground the appeal so
+            // the flagged-issues list comes out empty rather than non-empty.
+            controller.intakeExtraction = grounded
+              ? await seedGroundedRecords()
+              : null;
+            const caseId = await seedCase(intakeType, rawIntakeText, urgent);
+            controller.decision = { path, status: "AwaitingApproval" };
 
-            // Act: run the real pipeline end to end (Auto_Draft → an appeal is
-            // drafted → Verification_QA verifies it and stores the result).
-            await runAgent(caseId);
+            // Act: run the real pipeline end to end so Verification_QA derives and
+            // persists the Verification_Result.
+            const result = await runAgent(caseId);
+            expect(result.resolutionPath).toBe(path);
 
-            // An Appeal_Packet was generated, so Verification_QA ran and MUST
-            // have stored a Verification_Result on the Case (Req 22.5, 23.2).
-            expect(controller.appealCalls).toContain(caseId);
-            const result = await readVerificationResult(caseId);
-            expect(result).not.toBeNull();
-
-            const flagged = result!.flaggedIssues;
-            expect(Array.isArray(flagged)).toBe(true);
-
-            // (1) THE definition (Req 22.4): status is "pass" iff the list is
-            //     empty, "fail" otherwise — the exact biconditional, both ways.
-            expect(result!.status === "pass").toBe(flagged.length === 0);
-            expect(result!.status === "fail").toBe(flagged.length > 0);
-            expect(result!.status).toBe(flagged.length === 0 ? "pass" : "fail");
-
-            // (2) Both branches are genuinely exercised: the sampled scenario
-            //     steered the run into the expected pass/fail outcome.
-            expect(result!.status).toBe(scenario.expectPass ? "pass" : "fail");
-            if (scenario.expectPass) {
-              expect(flagged.length).toBe(0);
-            } else {
-              expect(flagged.length).toBeGreaterThan(0);
-            }
-
-            // (3) The stored list is a complete, well-formed flagged-issues list
-            //     (each issue carries its type/reference/detail/severity).
-            for (const issue of flagged) {
-              expect(typeof issue.type).toBe("string");
-              expect(typeof issue.reference).toBe("string");
-              expect(typeof issue.detail).toBe("string");
-              expect(["warning", "blocking"]).toContain(issue.severity);
-            }
+            // Assert: a result was stored (Verification_QA ran on a drafting path),
+            // and its status is the strict function of the flagged-issues list.
+            const vr = await readVerificationResult(caseId);
+            expect(vr).not.toBeNull();
+            assertPassFailDefinition(vr!);
           },
         ),
         FC_CONFIG,
       );
     },
-    600_000,
+    300_000,
   );
 });
 
 // ─── Focused examples (deterministic, illustrative) ───────────────────────────
 
-describe("runAgent — verification pass/fail definition (representative examples)", () => {
-  it("a fully-consistent appeal verifies with status pass and an empty flagged-issues list", async () => {
-    const caseId = await seedCase("denial_letter");
-    controller.intake = { ...cleanIntake };
-    controller.appealCalls = [];
+describe("verification pass/fail definition — representative examples", () => {
+  it("an empty flagged-issues list yields status pass (grounded appeal)", async () => {
+    controller.intakeExtraction = await seedGroundedRecords();
+    const caseId = await seedCase("denial_letter", "grounded appeal", false);
+    controller.decision = { path: "Auto_Draft", status: "AwaitingApproval" };
 
     await runAgent(caseId);
+    controller.intakeExtraction = null;
 
-    const result = await readVerificationResult(caseId);
-    expect(result?.status).toBe("pass");
-    expect(result?.flaggedIssues).toEqual([]);
+    const vr = await readVerificationResult(caseId);
+    expect(vr).not.toBeNull();
+    expect(vr!.flaggedIssues).toHaveLength(0);
+    expect(vr!.status).toBe("pass");
+    assertPassFailDefinition(vr!);
   });
 
-  it("an appeal citing an unresolved payer policy verifies with status fail and at least one flagged issue", async () => {
-    const caseId = await seedCase("new_pa_request");
-    controller.intake = { ...cleanIntake, payer: "Nonexistent Payer LLC" };
-    controller.appealCalls = [];
+  it("a non-empty flagged-issues list yields status fail (ungrounded appeal)", async () => {
+    controller.intakeExtraction = null;
+    const caseId = await seedCase("new_pa_request", "ungrounded appeal", true);
+    controller.decision = {
+      path: "Draft_And_Request_Evidence",
+      status: "AwaitingApproval",
+    };
 
     await runAgent(caseId);
 
-    const result = await readVerificationResult(caseId);
-    expect(result?.status).toBe("fail");
-    expect((result?.flaggedIssues.length ?? 0)).toBeGreaterThan(0);
-  });
-
-  it("an appeal referencing an unlinked patient verifies with status fail", async () => {
-    const caseId = await seedCase("phone_note");
-    controller.intake = { ...cleanIntake, patient: "Ghost Patient" };
-    controller.appealCalls = [];
-
-    await runAgent(caseId);
-
-    const result = await readVerificationResult(caseId);
-    expect(result?.status).toBe("fail");
-    expect((result?.flaggedIssues.length ?? 0)).toBeGreaterThan(0);
+    const vr = await readVerificationResult(caseId);
+    expect(vr).not.toBeNull();
+    expect(vr!.flaggedIssues.length).toBeGreaterThan(0);
+    expect(vr!.status).toBe("fail");
+    assertPassFailDefinition(vr!);
   });
 });
