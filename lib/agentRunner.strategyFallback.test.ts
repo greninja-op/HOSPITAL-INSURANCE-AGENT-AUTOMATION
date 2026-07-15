@@ -254,6 +254,16 @@ async function readUsedHistory(caseId: string): Promise<boolean | undefined> {
     : undefined;
 }
 
+/** Read the number of persisted Strategy_Options off Case.strategyOptions. */
+async function readOptionCount(caseId: string): Promise<number> {
+  const kase = await prisma.case.findUnique({
+    where: { id: caseId },
+    select: { strategyOptions: true },
+  });
+  const so = kase?.strategyOptions as { options?: unknown } | null;
+  return Array.isArray(so?.options) ? so!.options.length : 0;
+}
+
 // ─── Property 45 ───────────────────────────────────────────────────────────────
 
 describe("runAgent — Strategy fallback when history is unavailable (Task 11.12, Property 45)", () => {
@@ -277,6 +287,12 @@ describe("runAgent — Strategy fallback when history is unavailable (Task 11.12
             // Assert: the persisted fallback flag matches the scenario (Req 21.3).
             const used = await readUsedHistory(caseId);
             expect(used).toBe(expectedUsedHistory(scenario));
+
+            // And options are still produced (1..5) regardless of scenario —
+            // the fallback case must not drop the candidate approaches (Req 21.2/21.3).
+            const optionCount = await readOptionCount(caseId);
+            expect(optionCount).toBeGreaterThanOrEqual(1);
+            expect(optionCount).toBeLessThanOrEqual(5);
           },
         ),
         FC_CONFIG,
