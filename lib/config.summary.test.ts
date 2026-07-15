@@ -49,12 +49,19 @@ const WHATSAPP_KEYS = [
 // no match can straddle a boundary.)
 const STRUCTURAL_TOKENS = [...EXPECTED_SUMMARY_KEYS, "set", "missing"].join("\u0000");
 
-// Arbitrary, non-trivial secret values: non-empty after trimming (so the loader
-// treats them as present) and never a substring of the summary's own structure
-// (so any appearance in the output is a genuine leak, not a coincidence).
+// Arbitrary, non-trivial secret values. Drawn from an alphanumeric alphabet with
+// a distinctive prefix and a substantial minimum length so a generated secret can
+// NEVER coincide with JSON structural punctuation (braces, quotes, commas, colons)
+// nor with the summary's fixed key names / "set" / "missing" markers. This keeps
+// the leak assertion honest: any appearance of a secret in the output is genuine,
+// not a coincidental substring collision (e.g. a 1-char "," matching JSON commas).
 const secretArb = fc
-  .string({ minLength: 1, maxLength: 64 })
-  .filter((s) => s.trim() !== "" && !STRUCTURAL_TOKENS.includes(s));
+  .stringOf(
+    fc.constantFrom(..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".split("")),
+    { minLength: 6, maxLength: 48 },
+  )
+  .map((s) => `SECRET_${s}`)
+  .filter((s) => !STRUCTURAL_TOKENS.includes(s));
 
 interface ConfigPlan {
   qwenApiKey: string;
