@@ -239,11 +239,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - **Property 43: Win-probability count and range**
     - **Validates: Requirements 21.2**
 
-  - [ ]* 11.11 Write property test for strategy options ordered by descending win-probability
+  - [-]* 11.11 Write property test for strategy options ordered by descending win-probability
     - **Property 44: Strategy options ordered by descending win-probability**
     - **Validates: Requirements 21.4**
 
-  - [ ]* 11.12 Write property test for the strategy fallback when history is unavailable
+  - [-]* 11.12 Write property test for the strategy fallback when history is unavailable
     - **Property 45: Strategy fallback when history is unavailable**
     - **Validates: Requirements 21.3**
 
@@ -251,7 +251,7 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - Call the pure `decide()` over the Medical_Review, Policy_Review, and Strategy summaries (not raw documents), passing `contradictionCount = blockingCount(findings)` so routing is driven only by blocking Findings while `warning` findings are surfaced to the reviewer without forcing escalation; persist a `decision` Trace_Step storing overall confidence, path, and reasoning; on Auto_Draft/Draft_And_Request_Evidence set AwaitingApproval (recording requested evidence for the medium path) and on Escalate_To_Human set NeedsHumanInput, performing each Case_Status change through `assertTransition` (`lib/caseStatus.ts`)
     - _Requirements: 5.2, 5.6, 5.7, 5.8, 5.9, 28.1, 29.4, 29.5_
 
-  - [ ]* 11.14 Write property test for decision tracing
+  - [-]* 11.14 Write property test for decision tracing
     - **Property 16: Decisions are traced**
     - **Validates: Requirements 5.6**
 
@@ -259,11 +259,11 @@ This plan builds AuthPilot as a single Next.js 14 (App Router) + TypeScript repo
     - For Auto_Draft / Draft_And_Request_Evidence, generate the appeal PDF from the Decision_Intelligence stage output and store `appealPdfUrl`; skip generation on Escalate_To_Human
     - _Requirements: 7.1, 7.2_
 
-  - [ ]* 11.16 Write property test for conditional appeal generation
+  - [-]* 11.16 Write property test for conditional appeal generation
     - **Property 19: Appeal PDF generated only on drafting paths**
     - **Validates: Requirements 7.1**
 
-  - [ ]* 11.17 Write property test for appeal location storage
+  - [-]* 11.17 Write property test for appeal location storage
     - **Property 21: Appeal location is stored**
     - **Validates: Requirements 7.4**
 
